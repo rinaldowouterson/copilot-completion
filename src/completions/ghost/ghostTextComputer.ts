@@ -14,6 +14,7 @@ import { TrimNESResponseSuffixOverlap } from '../nes/suffixOverlapTrim';
 import { DiagnosticSummary, GhostCompletion } from './types';
 import { ResultType } from './resultType';
 import { srcLoc } from '../shared/log/srcLoc';
+import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';
 
 export interface GhostTextResult {
     completions: GhostCompletion[];
@@ -57,9 +58,12 @@ export class GhostTextComputer {
             return undefined;
         }
 
-        // Step 2: Validate inline suggestion position (isInlineSuggestion)
-        if (!this._isInlineSuggestion(document, position)) {
-            this._log.debug(`[GHOST] ${srcLoc()} |  SKIP ${loc} — not a valid inline suggestion position`);
+        // Step 2: Validate inline suggestion position (isInlineSuggestion ported from source)
+        const line = document.lineAt(position.line);
+        const textAfterCursor = line.text.substring(position.character);
+        const inlineSuggestion = isInlineSuggestionFromTextAfterCursor(textAfterCursor);
+        if (inlineSuggestion === undefined) {
+            this._log.debug(`[GHOST] ${srcLoc()} |  SKIP ${loc} — invalid mid-line position (after="${this._trunc(textAfterCursor, 40)}")`);
             return undefined;
         }
 
@@ -233,12 +237,6 @@ export class GhostTextComputer {
             }
         }
         return completion;
-    }
-
-    private _isInlineSuggestion(document: vscode.TextDocument, position: vscode.Position): boolean {
-        // A valid inline suggestion position: cursor is within text, not at start of doc
-        if (position.line === 0 && position.character === 0) return false;
-        return true;
     }
 
     private _postProcessChoiceInContext(
