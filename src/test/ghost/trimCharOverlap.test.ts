@@ -88,13 +88,16 @@ suite('_trimCharOverlap (GHOST suffix-boundary dedup)', () => {
     });
 
     test('suffix = ")\\n" (only closing paren on line) — no overlap at end', () => {
-        // The completion ends with "{" not ")", so no overlap is detected.
-        // This is the expected behavior — the first-line overlap check
-        // protects against false positives.
         const completion = 'int i = 0; i < 10; ++i) {';
         const suffix = ')\n}';
         const result = trimCharOverlap(completion, suffix);
-        // No trim because completion first line ends with "{" not ")"
         assert.strictEqual(result, completion);
+    });
+
+    test('ad(|) — completion "x, y)\\n...", suffix ")\\n   sub(1,0)"', () => {
+        const completion = 'x, y)\n    return x - y;';
+        const suffix = ')\n   sub(1,0)';
+        const result = trimCharOverlap(completion, suffix);
+        assert.strictEqual(result, 'x, y\n    return x - y;');
     });
 });
