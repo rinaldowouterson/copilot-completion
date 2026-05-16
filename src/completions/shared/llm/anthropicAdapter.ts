@@ -8,11 +8,12 @@ export class AnthropicAdapter implements ILLMAdapter {
         private readonly model: string,
     ) {}
 
-    async send(request: LLMRequest): Promise<LLMResponse> {
+    async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
         const url = `${this.baseUrl}/v1/messages`;
         const body = this.buildBody(request);
         const response = await fetch(url, {
             method: 'POST',
+                signal,
             headers: {
                 'Content-Type': 'application/json',
                 'x-api-key': this.apiKey,

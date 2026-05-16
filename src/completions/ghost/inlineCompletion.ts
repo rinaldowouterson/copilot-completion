@@ -12,8 +12,9 @@ export class GhostText {
     async getInlineCompletions(
         document: vscode.TextDocument,
         position: vscode.Position,
+        token?: vscode.CancellationToken,
     ): Promise<GhostTextResult | undefined> {
         const computer = this._instantiationService.createInstance(GhostTextComputer, new CurrentGhostText(), new LastGhostText());
-        return computer.getGhostText(document, position, false);
+        return computer.getGhostText(document, position, token, false);
     }
 }

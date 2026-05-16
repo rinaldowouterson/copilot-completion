@@ -5,7 +5,7 @@ import { SupportedEndpoint } from '../../../config/nesConfig';
 export const ILLMAdapterManager = createServiceIdentifier<ILLMAdapterManager>('ILLMAdapterManager');
 
 export interface ILLMAdapter {
-    send(request: LLMRequest): Promise<LLMResponse>;
+    send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse>;
 }
 
 export interface ILLMAdapterManager {
