@@ -1,0 +1,74 @@
+import * as vscode from 'vscode';
+import { createServiceIdentifier } from '../di/services';
+import { ConfigKeys } from './configKeys';
+
+export interface GhostCapabilities {
+    limits: {
+        max_output_tokens: number;
+        max_context_window_tokens: number;
+    };
+}
+
+export const IGhostConfigProvider = createServiceIdentifier<IGhostConfigProvider>('IGhostConfigProvider');
+
+export interface IGhostConfigProvider {
+    readonly _serviceBrand: undefined;
+    get enabled(): boolean;
+    get baseUrl(): string;
+    get apiKey(): string;
+    get model(): string;
+    get promptTemplate(): string;
+    get capabilities(): GhostCapabilities;
+    get maxOutputTokens(): number;
+    onDidChangeEnabled(listener: () => void): vscode.Disposable;
+}
+
+export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
+    readonly _serviceBrand: undefined;
+
+    get enabled(): boolean {
+        return vscode.workspace.getConfiguration().get<boolean>(ConfigKeys.Ghost.enabled, true);
+    }
+
+    get baseUrl(): string {
+        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.baseUrl, '');
+    }
+
+    get apiKey(): string {
+        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.apiKey, '');
+    }
+
+    get model(): string {
+        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.model, 'gpt-4o');
+    }
+
+    get promptTemplate(): string {
+        return vscode.workspace.getConfiguration().get<string>(
+            ConfigKeys.Ghost.promptTemplate,
+            '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>'
+        );
+    }
+
+    get capabilities(): GhostCapabilities {
+        return {
+            limits: {
+                max_output_tokens: this.maxOutputTokens,
+                max_context_window_tokens: vscode.workspace.getConfiguration()
+                    .get<number>(ConfigKeys.Ghost.maxContextWindowTokens, 128000),
+            }
+        };
+    }
+
+    get maxOutputTokens(): number {
+        return vscode.workspace.getConfiguration()
+            .get<number>(ConfigKeys.Ghost.maxOutputTokens, 256);
+    }
+
+    onDidChangeEnabled(listener: () => void): vscode.Disposable {
+        return vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration(ConfigKeys.Ghost.enabled)) {
+                listener();
+            }
+        });
+    }
+}
