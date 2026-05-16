@@ -1,0 +1,16 @@
+export interface LineRange0Based {
+    startLine: number;
+    endLineExclusive: number;
+}
+
+/**
+ * A neighbor-file snippet selected via Jaccard similarity, ready to be
+ * embedded into the recently_viewed_code_snippets section of the prompt.
+ */
+export interface INeighborFileSnippet {
+    readonly uri: string;
+    readonly relativePath: string | undefined;
+    readonly snippet: string;
+    readonly lineRange: LineRange0Based;
+    readonly score: number;
+}
