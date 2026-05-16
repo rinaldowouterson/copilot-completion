@@ -59,6 +59,17 @@
           "default": 128000,
           "description": "Max context window tokens"
         },
+        "cc-completion.ghost.suffixOverlapThreshold": {
+          "type": "number",
+          "default": 0.6,
+          "description": "Suffix overlap similarity threshold for GHOST completion trimming"
+        },
+        "cc-completion.ghost.suffixOverlapType": {
+          "type": "string",
+          "enum": ["low", "high"],
+          "default": "low",
+          "description": "Suffix overlap detection type for GHOST"
+        },
         "cc-completion.nes.enabled": {
           "type": "boolean",
           "default": true,

@@ -7,6 +7,8 @@ export const ConfigKeys = {
         promptTemplate: 'cc-completion.ghost.promptTemplate',
         maxOutputTokens: 'cc-completion.ghost.capabilities.limits.max_output_tokens',
         maxContextWindowTokens: 'cc-completion.ghost.capabilities.limits.max_context_window_tokens',
+        suffixOverlapThreshold: 'cc-completion.ghost.suffixOverlapThreshold',
+        suffixOverlapType: 'cc-completion.ghost.suffixOverlapType',
     },
     Nes: {
         enabled: 'cc-completion.nes.enabled',

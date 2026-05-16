@@ -10,6 +10,7 @@ import { CurrentGhostText } from './current';
 import { LastGhostText } from './last';
 import { IAsyncCompletionsManager } from './asyncCompletions';
 import { TerseBlockTrimmer, VerboseBlockTrimmer } from './blockTrimmer';
+import { TrimNESResponseSuffixOverlap } from '../nes/suffixOverlapTrim';
 import { DiagnosticSummary, GhostCompletion } from './types';
 import { ResultType } from './resultType';
 
@@ -80,12 +81,32 @@ export class GhostTextComputer {
                 stop: isSingleLine ? ['\n'] : undefined,
             });
 
-            const trimmedText = isSingleLine
+            // Block trim
+            const blockTrimmedText = isSingleLine
                 ? new TerseBlockTrimmer().trim(response.text)
                 : new VerboseBlockTrimmer().trim(response.text);
 
+            // Character-level suffix overlap — trim completion tail that matches suffix head
+            // Fixes `for()` where model outputs `int i=0;...){` and suffix is `)`
+            const charTrimmedText = this._trimCharOverlap(blockTrimmedText, suffix);
+
+            // Line-level suffix overlap — TrimNESResponseSuffixOverlap for multi-line dedup
+            const completionLines = charTrimmedText.split('\n');
+            const suffixLines = suffix.split('\n');
+            const overlapTrimmer = new TrimNESResponseSuffixOverlap(
+                this._config.suffixOverlapThreshold,
+                this._config.suffixOverlapType,
+            );
+            const lineOverlapCount = overlapTrimmer.calculateOverlap(completionLines, suffixLines);
+            const trimmedLines = lineOverlapCount > 0
+                ? completionLines.slice(0, completionLines.length - lineOverlapCount)
+                : completionLines;
+            const trimmedText = trimmedLines.join('\n');
+
+            const finalText = trimmedText.length > 0 ? trimmedText : charTrimmedText;
+
             const choices: CompletionChoice[] = [{
-                text: trimmedText,
+                text: finalText,
                 finishReason: response.finishReason,
             }];
             this._cache.append(prefix, suffix, choices[0]);
@@ -93,12 +114,30 @@ export class GhostTextComputer {
             return {
                 completions: choices.map(c => this._toGhostCompletion(c)),
                 resultType: ResultType.Network,
-                suffixCoverage: 0,
+                suffixCoverage: lineOverlapCount,
             };
         } catch (err) {
             this._log.error(`GHOST request failed: ${err}`);
             return undefined;
         }
+    }
+
+    private _trimCharOverlap(completion: string, suffix: string): string {
+        if (!completion || !suffix) return completion;
+
+        // Find the longest suffix of `completion` that matches a prefix of `suffix`
+        // This trims character-by-character overlap at the completion/suffix boundary
+        let maxOverlap = 0;
+        const maxCheck = Math.min(completion.length, suffix.length);
+        for (let n = maxCheck; n > 0; n--) {
+            const completionTail = completion.slice(completion.length - n);
+            const suffixHead = suffix.slice(0, n);
+            if (completionTail === suffixHead) {
+                maxOverlap = n;
+                break;
+            }
+        }
+        return maxOverlap > 0 ? completion.slice(0, completion.length - maxOverlap) : completion;
     }
 
     private _toGhostCompletion(choice: CompletionChoice): GhostCompletion {
