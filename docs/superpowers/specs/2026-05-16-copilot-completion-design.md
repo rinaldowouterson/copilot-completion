@@ -66,9 +66,13 @@ src/
 │   │   └── types.ts                      #   内部类型定义
 │   │
 │   ├── nes/                              # NES 补全模块
-│   │   ├── nesProvider.ts                #   无状态 NES provider (XtabProvider 核心)
-│   │   ├── nextEditProvider.ts           #   有状态编排器
-│   │   ├── promptCrafting.ts             #   Prompt 构建
+│   │   ├── nesProvider.ts                #   无状态 NES provider (prompt 构建 + 请求 + 后处理)
+│   │   ├── nextEditProvider.ts           #   有状态编排器 (InlineCompletionItemProvider)
+│   │   ├── nextCursorPredictor.ts        #   光标跳转预测 (NextCursorPredictor)
+│   │   ├── promptCrafting.ts             #   Prompt 构建 (PromptPieces + getUserPrompt + constructTaggedFile)
+│   │   ├── promptCraftingUtils.ts        #   Prompt 工具 (toUniquePath, countTokensForLines)
+│   │   ├── tags.ts                       #   PromptTags / ResponseTags 常量
+│   │   ├── xtabCurrentDocument.ts        #   CurrentDocument 类
 │   │   ├── systemMessages.ts             #   系统 prompt 定义
 │   │   ├── responseFormatHandlers.ts     #   响应格式解析
 │   │   ├── editIntent.ts                 #   编辑意图解析
@@ -76,8 +80,13 @@ src/
 │   │   ├── speculativeRequest.ts         #   推测性预取管理
 │   │   ├── editRebase.ts                 #   编辑 rebase 算法
 │   │   ├── cursorLineDivergence.ts       #   提前分叉检测
-│   │   ├── suffixOverlapTrim.ts           #   后缀重叠检测与裁剪 (TrimNESResponseSuffixOverlap)
-│   │   └── types.ts                      #   内部类型定义
+│   │   ├── suffixOverlapTrim.ts          #   后缀重叠检测与裁剪 (TrimNESResponseSuffixOverlap)
+│   │   ├── lintErrors.ts                 #   LintErrors (stub)
+│   │   ├── diffHistoryForPrompt.ts       #   getEditDiffHistory (stub)
+│   │   ├── recentFilesForPrompt.ts       #   getRecentCodeSnippets (stub)
+│   │   ├── similarFilesContextService.ts #   INeighborFileSnippet 类型
+│   │   ├── types.ts                      #   对外类型 (NextEditResult, 重导出 PromptingStrategy)
+│   │   └── stubs/                        #   从源项目移植的类型与工具类
 │   │
 │   └── shared/                           # GHOST/NES 共享
 │       ├── log/
@@ -342,20 +351,34 @@ GhostTextComputer
 
 ### Prompt 构建
 
-**与 `fake-vscode-copilot-chat` 原始实现保持一致**，完整移植 `promptCrafting.ts` 的 `getUserPrompt()` 和 `PromptPieces` 机制：
+**与 `fake-vscode-copilot-chat` 原始实现保持一致**，使用 `promptCrafting.ts` 的 `getUserPrompt()` + `constructTaggedFile()` 管道：
 
 ```
-1. 当前文件标记: 编辑窗口 (光标上 2 行 + 下 5 行) 用 <edit_window> 标签包裹
-   - 内部用 `###remain edit start boundary line###` / `###remain edit end boundary line###` 标记编辑边界
-2. 周围上下文: 15 行代码 (用 <area_around> 标签包裹)
-3. 语言上下文 (languageContext)
-4. Lint 错误格式化 (lintErrors)
-5. 编辑 diff 历史 (editHistory — 用户的修改轨迹)
-6. 最近查看文件片段 (recentFiles)
-7. PostScript — 输出格式指令
+1. CurrentDocument: 文档文本 + 1-based 光标位置 (Position)
+2. constructTaggedFile(): 注入 <|cursor|> 标记、构建 area_around 结构、paged clipping
+3. area_around 结构:
+   <|area_around_code_to_edit|>
+     <|area_code_prefix|>     ← 编辑窗口上方的行 (含 <|cursor|>)
+     <|code_to_edit|>
+       ###remain edit start boundary line###
+       <edit window lines with cursor tag>
+       ###remain edit end boundary line###
+     <|/code_to_edit|>
+     <|area_code_suffix|>     ← 编辑窗口下方的行
+   <|/area_around_code_to_edit|>
+4. PromptPieces: 聚合 currentDocument、editWindow、xtabHistory、lintErrors、taggedDoc 等
+5. getUserPrompt() → 组装完整 prompt:
+   - <|recently_viewed_code_snippets|> (recent files)
+   - <|current_file_content|> (当前文件内容，可选 cursor tag)
+   - <|edit_diff_history|> (编辑历史)
+   - area_around_code_to_edit 块
+   - PostScript (Xtab275 输出格式指令)
+6. 追加: prediction 输出示例 + 额外指令
+   - "current document is {lang}. **Just can improve `code_to_eidt` section ...**"
+   - prediction example: 用边界标记包裹 edit window，教模型输出格式
 ```
 
-不简化，保持与源项目完全一致的 prompt 结构。同时保留 `tags.ts` 中的 PromptTags / ResponseTags 常量定义。
+prompt 结构完全由 `promptCrafting.ts` 的 `getUserPrompt()` 生成，`nesProvider.ts` 负责构建输入、追加 prediction 和额外指令。
 
 ### 核心流水线
 
@@ -367,27 +390,36 @@ NextEditProvider (有状态编排器)
   │     └── Rebase → tryRebase() 适配用户编辑
   │
   ├── 无缓存 → NesProvider.provideNextEdit() (无状态)
-  │     1. 构建 PromptPieces (文档、编辑窗口、上下文)
-  │     2. getUserPrompt() → 用户 prompt 字符串
-  │     3. pickSystemPrompt(strategy) → 系统 prompt
-  │     4. LLMAdapter.send() → 流式 SSE 请求 (stream:true)
-  │     5. handleEditWindowOnly() → 解析响应
-  │     6. diff() → diff 模型输出与编辑窗口
-  │     7. suffixOverlapTrim() → 基于 Levenshtein 相似度裁剪后缀重叠行
-│     8. filterEdit() → 过滤空/noop/注释/光标移动编辑
+  │     1. 构建 CurrentDocument (1-based Position, \r\n→\n)
+  │     2. 计算 ranges → constructTaggedFile() 注入 <|cursor|>, 构建 area_around 标签
+  │     3. 创建 PromptPieces + getUserPrompt() → 用户 prompt 字符串
+  │     4. 追加 prediction 输出示例 (边界标记包裹 edit window) + 额外指令
+  │     5. pickSystemPrompt(Xtab275) → 系统 prompt
+  │     6. LLMAdapter.send() → 流式 SSE 请求 (stream:true)
+  │     7. handleEditWindowOnly() → 解析响应
+  │     8. suffixOverlapTrim() → 基于 Levenshtein 相似度裁剪后缀重叠行
+  │     9. filterEdit() → 过滤空/noop/注释/光标移动编辑
   │
   ├── 推测性预取 → SpeculativeRequestManager
   │     └── 接受编辑后预取下一个编辑
+  │
+  ├── 光标预测 → NextCursorPredictor (fire-and-forget)
+  │     └── 预测下一个编辑位置 (sameFile lineNumber / crossFile path:line)
   │
   └── 提前分叉检测 → CursorLineDivergence
 ```
 
 ### NES 功能范围
 
-- Prompt 构建 (Xtab275 策略)
+- Prompt 构建 (Xtab275 策略, getUserPrompt + constructTaggedFile 管道)
+- PromptTags 结构: `<|code_to_edit|>` + `###remain edit start/end boundary line###` + `<|area_around_code_to_edit|>` + `<|area_code_prefix|>`/`<|area_code_suffix|>` + `<|cursor|>`
+- PostScript 输出格式指令 (Xtab275)
+- Prediction 输出示例 (边界标记包裹 edit window，教模型格式)
+- 系统 prompt (Xtab275)
 - 响应解析 (EditWindowOnly 格式)
 - 编辑缓存 + Rebase
 - 推测性预取
+- 光标预测 (NextCursorPredictor — sameFile/crossFile)
 - 提前分叉检测
 - 后缀重叠裁剪 (TrimNESResponseSuffixOverlap，Levenshtein 相似度算法)
 - 编辑意图解析
@@ -461,7 +493,10 @@ NextEditProvider (有状态编排器)
 
 | 步骤 | 状态 |
 |------|------|
-| PromptPieces + getUserPrompt 构建 | ✅ 保留 |
+| constructTaggedFile + PromptPieces + getUserPrompt 构建 | ✅ 完整移植 |
+| PromptTags 边界标记 (`###remain edit start/end boundary line###`) | ✅ 完整移植 |
+| `<\|cursor\|>` 标签注入 + area_around 结构 | ✅ 完整移植 |
+| Prediction 输出示例 (边界标记 + edit window) | ✅ 已补 |
 | systemPrompt (Xtab275) | ✅ 保留 |
 | 网络请求 (流式 SSE) | ✅ stream:true, SSE 解析 |
 | 响应解析 (EditWindowOnly) | ✅ 保留 |
@@ -470,10 +505,9 @@ NextEditProvider (有状态编排器)
 | 后缀重叠裁剪 (TrimNESResponseSuffixOverlap) | ✅ 保留 |
 | 编辑缓存 + Rebase | ✅ 保留 |
 | 推测性预取 | ✅ 保留 |
-| ~~完整的 getUserPrompt (diff history, recent files)~~ | ❌ 简化版 |
+| 光标跳转预测 (NextCursorPredictor) | ✅ 已补 |
 | ~~ResponseProcessor.diff() 精确 diff~~ | ❌ 简化版 |
-| ~~光标跳转预测~~ | ❌ 按需求移除 |
-| ~~早期分叉检测~~ | ❌ 按需求移除 |
+| ~~完整的 diffHistory / neighborSnippets / langCtx 服务~~ | ❌ stub 返回空 |
 
 ---
 ## 单元测试
@@ -508,6 +542,8 @@ NextEditProvider (有状态编排器)
 | 2026-05-16 | 日志清理 | 移除 `srcLoc()` 调用和文档 `loc` 变量，日志格式 `[模块] 消息`。`LLMError.toString()` 输出 statusCode + responseBody |
 | 2026-05-16 | `LLMError.toString()` | 重写 `toString()` 输出 `name + message + status + body`，方便 `${err}` 模板字符串调试 |
 | 2026-05-17 | `\r\n` → `\n` 统一 | GHOST prefix/suffix/prompt、NES document text/suffix overlap 所有位置做 `.replace(/\r\n/g, '\n')`，消除 Windows CRLF 对 LLM prompt 的影响 |
+| 2026-05-17 | LLM 适配器 `normalizeBody()` | `llmRequest.ts` 新增 `normalizeBody()`，4 个适配器 (`openaiChat/openaiCompletion/anthropic/openaiResponse`) 在 `fetch` 前统一调用，兜底替换 `\r\n` → `\n` |
+| 2026-05-17 | GHOST 缩进重叠裁剪 | `ghostTextProvider.ts` 新增 `trimIndentOverlap()`，光标在纯空白行时裁剪补全开头与当前行空白重叠的部分，仅当裁剪后以非空白字符开头才生效（防止 `    |` + `    }` → `        }` 导致补全无法确认） |
 
 ---
 
@@ -526,4 +562,4 @@ NextEditProvider (有状态编排器)
 5. **stream: true** — 所有 LLM 请求流式，SSE 解析（参考 `stream.ts`），JSON fallback
 6. **配置分离** — GHOST 和 NES 各自独立的 model/capabilities 配置
 7. **suffix 起始行** — suffix 从光标所在行的下一行开始，光标同行后面的文本不进入 suffix（避免 `)` 等闭合同行字符错误进入后缀）
-8. **`\r\n` → `\n`** — 所有送入 LLM 的 prompt、prefix、suffix、document text 统一换行为 `\n`，消除 Windows CRLF 影响
+8. **`\r\n` → `\n`** — 所有送入 LLM 的文本统一换行为 `\n`：上游在提取 prefix/suffix/document 时规范化，适配器层在 `fetch` 前通过 `normalizeBody()` 兜底

@@ -5,6 +5,7 @@ import { ILogService } from '../shared/log/logService';
 import { NesProvider } from './nesProvider';
 import { NextEditResult } from './types';
 import { SpeculativeRequestManager } from './speculativeRequest';
+import { NextCursorPredictor } from './nextCursorPredictor';
 import { createServiceIdentifier } from '../../di/services';
 
 export const INesProvider = createServiceIdentifier<INesProvider>('INesProvider');
@@ -18,6 +19,7 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
     readonly _serviceBrand: undefined;
     private _disposable: vscode.Disposable | undefined;
     private _speculativeManager: SpeculativeRequestManager;
+    private _cursorPredictor: NextCursorPredictor;
 
     constructor(
         @IInstantiationService private readonly _instantiationService: IInstantiationService,
@@ -25,6 +27,7 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         @ILogService private readonly _log: ILogService,
     ) {
         this._speculativeManager = this._instantiationService.createInstance(SpeculativeRequestManager);
+        this._cursorPredictor = this._instantiationService.createInstance(NextCursorPredictor);
     }
 
     register(): vscode.Disposable {
@@ -75,6 +78,17 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             result.edit,
             result.range,
         );
+
+        // Fire-and-forget: predict next cursor position for speculative pre-fetch
+        this._cursorPredictor.predict(document, position, token).then(prediction => {
+            if (prediction) {
+                this._log.debug(`[NES]  cursor_prediction kind=${prediction.kind} line=${prediction.lineNumber}`);
+                if (prediction.kind === 'sameFile') {
+                    this._log.debug(`[NES]  speculative pre-fetch at predicted line ${prediction.lineNumber}`);
+                }
+            }
+        }).catch(() => { /* ignore cursor prediction failures */ });
+
         return [item];
     }
 }

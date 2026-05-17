@@ -1,5 +1,5 @@
 import { ILLMAdapter } from './llmAdapter';
-import { LLMRequest, LLMResponse, LLMError } from './llmRequest';
+import { LLMRequest, LLMResponse, LLMError, normalizeBody } from './llmRequest';
 import { readSSEStream } from './sseStream';
 
 export class AnthropicAdapter implements ILLMAdapter {
@@ -36,7 +36,7 @@ export class AnthropicAdapter implements ILLMAdapter {
                 'x-api-key': this.apiKey,
                 'anthropic-version': '2023-06-01',
             },
-            body: JSON.stringify(bodyObj),
+            body: normalizeBody(JSON.stringify(bodyObj)),
         });
 
         if (!response.ok) {

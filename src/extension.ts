@@ -108,6 +108,7 @@ function registerLLMAdapters(
         ghostConfig.baseUrl,
         ghostConfig.apiKey,
         ghostConfig.model,
+        log,
     ));
     log.debug('Registered GHOST adapter: completions');
 

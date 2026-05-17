@@ -1,15 +1,19 @@
 import { ILLMAdapter } from './llmAdapter';
-import { LLMRequest, LLMResponse, LLMError } from './llmRequest';
+import { LLMRequest, LLMResponse, LLMError, normalizeBody } from './llmRequest';
 import { readSSEStream } from './sseStream';
+import { ILogService } from '../log/logService';
 
 export class OpenAICompletionAdapter implements ILLMAdapter {
     constructor(
         private readonly baseUrl: string,
         private readonly apiKey: string,
         private readonly model: string,
+        private readonly logService: ILogService,
     ) {}
 
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
+        this.logService.debug(`[OpenAI] Sending request | model=${this.model} | maxTokens=${request.max_tokens} | temperature=${request.temperature}`);
+
         const url = `${this.baseUrl}/completions`;
         const body = JSON.stringify({
             model: this.model,
@@ -29,11 +33,12 @@ export class OpenAICompletionAdapter implements ILLMAdapter {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${this.apiKey}`,
             },
-            body,
+            body: normalizeBody(body),
         });
 
         if (!response.ok) {
             const text = await response.text();
+            this.logService.error(`[OpenAI] Request failed | status=${response.status} | error=${text}`);
             throw new LLMError(`OpenAI completions API failed: ${response.status}`, response.status, text + body);
         }
 
@@ -46,9 +51,12 @@ export class OpenAICompletionAdapter implements ILLMAdapter {
                 if (choice?.text) text += choice.text;
                 if (choice?.finish_reason) finishReason = choice.finish_reason;
             });
+            this.logService.debug(`[OpenAI] Streaming response complete | textLength=${text.length}`);
             return { text, finishReason };
         }
-        return this._parseJSON(await response.text());
+        const jsonResponse = this._parseJSON(await response.text());
+        this.logService.debug(`[OpenAI] Response success | textLength=${jsonResponse.text.length} | finishReason=${jsonResponse.finishReason}`);
+        return jsonResponse;
     }
 
     private _parseJSON(raw: string): LLMResponse {

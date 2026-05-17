@@ -1,5 +1,5 @@
 import { ILLMAdapter } from './llmAdapter';
-import { LLMRequest, LLMResponse, LLMError } from './llmRequest';
+import { LLMRequest, LLMResponse, LLMError, normalizeBody } from './llmRequest';
 import { readSSEStream } from './sseStream';
 
 export class OpenAIChatAdapter implements ILLMAdapter {
@@ -27,7 +27,7 @@ export class OpenAIChatAdapter implements ILLMAdapter {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${this.apiKey}`,
             },
-            body,
+            body: normalizeBody(body),
         });
 
         if (!response.ok) {

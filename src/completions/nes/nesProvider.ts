@@ -3,11 +3,20 @@ import { IInstantiationService } from '../../di/instantiation';
 import { INesConfigProvider } from '../../config/nesConfig';
 import { ILLMAdapterManager } from '../shared/llm/llmAdapter';
 import { ILogService } from '../shared/log/logService';
-import { PromptingStrategy, NextEditResult, PromptPieces, LineRange0Based } from './types';
+import { PromptingStrategy, NextEditResult } from './types';
 import { pickSystemPrompt } from './systemMessages';
 import { handleEditWindowOnly } from './responseFormatHandlers';
 import { TrimNESResponseSuffixOverlap } from './suffixOverlapTrim';
 import { INextEditCache } from './nextEditCache';
+import { CurrentDocument } from './xtabCurrentDocument';
+import { StringText } from './stubs/abstractText';
+import { Position } from './stubs/position';
+import { OffsetRange } from './stubs/offsetRange';
+import { DocumentId, StatelessNextEditDocument, PromptOptions, IncludeLineNumbersOption, AggressivenessLevel, LintOptionWarning, LintOptionShowCode } from './stubs/types';
+import { constructTaggedFile, getUserPrompt, PromptPieces, N_LINES_ABOVE, N_LINES_BELOW, N_LINES_AS_CONTEXT } from './promptCrafting';
+import { LintErrors } from './lintErrors';
+import { PromptTags } from './tags';
+import { toUniquePath } from './promptCraftingUtils';
 
 export class NesProvider {
     constructor(
@@ -58,16 +67,68 @@ export class NesProvider {
             return undefined;
         }
 
-        // Step 3: Build prompt pieces
+        // Step 3: Build prompt via getUserPrompt() pipeline
         const t2 = Date.now();
-        const promptPieces = this._buildPromptPieces(document, position);
-        this._log.debug(`[NES]  edit_window L${promptPieces.editWindowRange.startLine + 1}-L${promptPieces.editWindowRange.endLineExclusive} area_around L${promptPieces.areaAroundRange.startLine + 1}-L${promptPieces.areaAroundRange.endLineExclusive} lang=${promptPieces.languageContext} [${Date.now() - t2}ms]`);
+        const normalizedText = docText.replace(/\r\n/g, '\n');
+        const cursorPos = new Position(position.line + 1, position.character + 1);
+        const currentDocument = new CurrentDocument(new StringText(normalizedText), cursorPos);
 
-        // Step 4: Build prompts
-        const t3 = Date.now();
-        const userPrompt = this._buildUserPrompt(promptPieces);
+        const ewStart = Math.max(0, position.line - N_LINES_ABOVE);
+        const ewEndExcl = Math.min(document.lineCount, position.line + N_LINES_BELOW + 1);
+        const editWindowLinesRange = new OffsetRange(ewStart, ewEndExcl);
+
+        const aaStart = Math.max(0, position.line - N_LINES_AS_CONTEXT);
+        const aaEndExcl = Math.min(document.lineCount, position.line + N_LINES_AS_CONTEXT + 1);
+        const areaAroundEditWindowLinesRange = new OffsetRange(aaStart, aaEndExcl);
+
+        const computeTokens = (s: string) => Math.floor(s.length / 4);
+        const promptOptions: PromptOptions = {
+            promptingStrategy: PromptingStrategy.Xtab275,
+            includePostScript: true,
+            recentlyViewedDocuments: { maxTokens: 2000, nDocuments: 10, includeViewedFiles: true, clippingStrategy: 'TopToBottom' as any, includeLineNumbers: IncludeLineNumbersOption.None },
+            currentFile: { includeCursorTag: true, includeLineNumbers: IncludeLineNumbersOption.None, maxTokens: 4000, prioritizeAboveCursor: true, includeTags: true },
+            languageContext: { maxTokens: 2000, traitPosition: 'before' },
+            lintOptions: { tagName: 'diagnostics', warnings: LintOptionWarning.NO, showCode: LintOptionShowCode.NO, maxLints: 10, maxLineDistance: 50, nRecentFiles: 3 },
+            neighborFiles: { enabled: false, maxTokens: 2000 },
+            pagedClipping: { pageSize: 50 },
+            diffHistory: { onlyForDocsInPrompt: true, maxTokens: 2000, nEntries: 10, useRelativePaths: true },
+        };
+
+        const taggedR = constructTaggedFile(currentDocument, editWindowLinesRange, areaAroundEditWindowLinesRange, promptOptions, computeTokens, {
+            includeLineNumbers: { areaAroundCodeToEdit: IncludeLineNumbersOption.None, currentFileContent: IncludeLineNumbersOption.None },
+        });
+        if (taggedR.isError()) {
+            this._log.info(`[NES]  SKIP — prompt too large total=${Date.now() - t0}ms`);
+            return undefined;
+        }
+        const { clippedTaggedCurrentDoc, areaAroundCodeToEdit } = taggedR.val;
+
+        const activeDoc: StatelessNextEditDocument = { id: DocumentId.create(document.uri.toString()) };
+        const lintErrors = new LintErrors(activeDoc.id, currentDocument);
+
+        const promptPieces = new PromptPieces(
+            currentDocument, editWindowLinesRange, areaAroundEditWindowLinesRange,
+            activeDoc, [], clippedTaggedCurrentDoc.lines, areaAroundCodeToEdit,
+            undefined, AggressivenessLevel.Medium, lintErrors, computeTokens, promptOptions,
+        );
+
+        const { prompt: baseUserPrompt } = getUserPrompt(promptPieces);
+
+        const getPredictedOutput = (): string => {
+            const editWindowLines = this._getEditWindowLines(document, position);
+            if (editWindowLines.length === 0) return '';
+            return editWindowLines.join('\n');
+        };
+        const prediction = getPredictedOutput();
+
+        let userPrompt = baseUserPrompt + `current document is ${document.languageId}. **Just can improve \`code_to_eidt\` section and output modifying result. Don't return other content.**`;
+        if (prediction.length > 0) {
+            userPrompt += `\n\nThe output example is as follows:\n\n\`\`\`\n###remain edit start boundary line###\n${prediction}\n###remain edit end boundary line###\n\`\`\`\n`;
+        }
+
         const systemPrompt = pickSystemPrompt(PromptingStrategy.Xtab275);
-        this._log.debug(`[NES]  system_prompt=${systemPrompt.length}ch user_prompt=${userPrompt.length}ch [${Date.now() - t3}ms]`);
+        this._log.debug(`[NES]  edit_window L${ewStart + 1}-L${ewEndExcl} area_around L${aaStart + 1}-L${aaEndExcl} lang=${document.languageId}`);
+        this._log.debug(`[NES]  system_prompt=${systemPrompt.length}ch user_prompt=${userPrompt.length}ch [${Date.now() - t2}ms]`);
 
         if (token?.isCancellationRequested) {
             this._log.info(`[NES]  CANCEL after_prompt_build`);
@@ -126,7 +187,7 @@ export class NesProvider {
             );
             const suffixLines = document.getText(
                 new vscode.Range(position, document.lineAt(document.lineCount - 1).range.end)
-            ).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+            ).replace(/\r\n/g, '\n').split('\n');
             const overlapCount = trimmer.calculateOverlap(parsed.lines, suffixLines);
             const finalLines = overlapCount > 0
                 ? parsed.lines.slice(0, parsed.lines.length - overlapCount)
@@ -203,71 +264,6 @@ export class NesProvider {
         if (!hasNonComment) return true;
 
         return false;
-    }
-
-    private _buildPromptPieces(document: vscode.TextDocument, position: vscode.Position): PromptPieces {
-        const nLinesAbove = 2;
-        const nLinesBelow = 5;
-        const nContextLines = 15;
-
-        const editWindowStart = Math.max(0, position.line - nLinesAbove);
-        const editWindowEnd = Math.min(document.lineCount, position.line + nLinesBelow + 1);
-        const contextStart = Math.max(0, position.line - nContextLines);
-
-        return {
-            currentDocument: {
-                text: document.getText().replace(/\r\n/g, '\n').replace(/\r/g, '\n'),
-                cursorLine: position.line,
-                cursorColumn: position.character,
-            },
-            editWindowRange: {
-                startLine: editWindowStart,
-                endLineExclusive: editWindowEnd,
-            },
-            areaAroundRange: {
-                startLine: contextStart,
-                endLineExclusive: editWindowEnd,
-            },
-            languageContext: document.languageId,
-            lintErrors: [],
-            editHistory: [],
-            neighborSnippets: [],
-        };
-    }
-
-    private _buildUserPrompt(pieces: PromptPieces): string {
-        const doc = pieces.currentDocument;
-        const docLines = doc.text.split('\n');
-
-        const editWindowLines = docLines.slice(
-            pieces.editWindowRange.startLine,
-            pieces.editWindowRange.endLineExclusive,
-        );
-
-        const areaAroundLines = docLines.slice(
-            pieces.areaAroundRange.startLine,
-            pieces.editWindowRange.endLineExclusive,
-        );
-
-        let prompt = '';
-
-        prompt += '<edit_window>\n';
-        prompt += '###remain edit start boundary line###\n';
-        prompt += editWindowLines.join('\n');
-        prompt += '\n###remain edit end boundary line###\n';
-        prompt += '</edit_window>\n\n';
-
-        prompt += '<area_around>\n';
-        prompt += areaAroundLines.join('\n');
-        prompt += '\n</area_around>\n\n';
-
-        if (pieces.languageContext) {
-            prompt += `Language: ${pieces.languageContext}\n`;
-        }
-
-        prompt += `Cursor is at line ${doc.cursorLine}, column ${doc.cursorColumn}\n`;
-
-        return prompt;
     }
 
     private _buildResult(edit: string, document: vscode.TextDocument, position: vscode.Position): NextEditResult {

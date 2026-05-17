@@ -73,8 +73,8 @@ export class GhostTextComputer {
         // Step 3: Extract prefix/suffix
         // suffix 从光标所在行的下一行开始，光标所在行光标后面的文本不进入 suffix
         const t1 = Date.now();
-        const prefix = document.getText(new vscode.Range(new vscode.Position(0, 0), position))
-            .replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const prefix = "\n" + document.getText(new vscode.Range(new vscode.Position(0, 0), position))
+            .replace(/\r\n/g, '\n');
         const suffixStartLine = position.line + 1;
         const suffix ="\n" + (suffixStartLine < document.lineCount
             ? document.getText(
@@ -82,8 +82,8 @@ export class GhostTextComputer {
                     new vscode.Position(suffixStartLine, 0),
                     document.lineAt(document.lineCount - 1).range.end,
                 ),
-            ).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-            : '');
+            ).replace(/\r\n/g, '\n')
+            : '')  + "\n";
         this._log.debug(`[GHOST] prefix=${prefix.length}ch suffix=${suffix.length}ch [${Date.now() - t1}ms]`);
         this._log.debug(`[GHOST] prefix_tail="${this._trunc(prefix, 80)}"`);
         this._log.debug(`[GHOST] suffix_head="${this._trunc(suffix, 80)}"`);
@@ -122,7 +122,7 @@ export class GhostTextComputer {
             diagnostics,
             recentEdits: this._recentEdits.recentEdits,
         });
-        prompt = prompt.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        prompt = prompt.replace(/\r\n/g, '\n');
         this._log.debug(`[GHOST] prompt=${prompt.length}ch model=${this._config.model} [${Date.now() - t4}ms]`);
         this._log.debug(`prompt\n ${prompt}`);
 

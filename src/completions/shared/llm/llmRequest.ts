@@ -3,6 +3,11 @@ export interface ChatMessage {
     content: string;
 }
 
+/** Replace \r\n → \n before sending to LLM. LLMs handle \n consistently but \r\n support varies. */
+export function normalizeBody(body: string): string {
+    return body.replace(/\r\n/g, '\n');
+}
+
 export interface Capabilities {
     thinking?: boolean;
     reasoning_effort?: string;
