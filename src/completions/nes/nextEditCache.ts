@@ -8,6 +8,8 @@ export interface CachedEdit {
     editWindow: { startLine: number; endLineExclusive: number };
     edit: string;
     cacheTime: number;
+    /** Set when this edit was returned as an inline (ghost text) suggestion */
+    wasRenderedAsInlineSuggestion?: boolean;
 }
 
 export interface CachedOrRebasedEdit extends CachedEdit {

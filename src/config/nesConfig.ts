@@ -31,6 +31,8 @@ export interface INesConfigProvider {
     get presencePenalty(): number;
     get frequencyPenalty(): number;
     get stream(): boolean;
+    get nextCursorPredictionEnabled(): boolean;
+    get mimicGhostTextBehavior(): boolean;
     onDidChangeEnabled(listener: () => void): vscode.Disposable;
 }
 
@@ -102,6 +104,16 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     get stream(): boolean {
         return vscode.workspace.getConfiguration()
             .get<boolean>(ConfigKeys.Nes.stream, true);
+    }
+
+    get nextCursorPredictionEnabled(): boolean {
+        return vscode.workspace.getConfiguration()
+            .get<boolean>(ConfigKeys.Nes.nextCursorPredictionEnabled, false);
+    }
+
+    get mimicGhostTextBehavior(): boolean {
+        return vscode.workspace.getConfiguration()
+            .get<boolean>(ConfigKeys.Nes.mimicGhostTextBehavior, false);
     }
 
     onDidChangeEnabled(listener: () => void): vscode.Disposable {

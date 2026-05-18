@@ -29,5 +29,7 @@ export const ConfigKeys = {
         presencePenalty: 'cc-completion.nes.presencePenalty',
         frequencyPenalty: 'cc-completion.nes.frequencyPenalty',
         stream: 'cc-completion.nes.stream',
+        nextCursorPredictionEnabled: 'cc-completion.nes.nextCursorPrediction.enabled',
+        mimicGhostTextBehavior: 'cc-completion.nes.mimicGhostTextBehavior',
     }
 } as const;
