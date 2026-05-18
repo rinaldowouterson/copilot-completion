@@ -31,15 +31,11 @@ export class InlineSuggestionResolver {
             effectiveText = stripped.newText;
         }
 
-        if (effectiveRange.start.line !== cursorPos.line) {
+        if (effectiveRange.start.line !== effectiveRange.end.line || effectiveRange.start.line !== cursorPos.line) {
             return undefined;
         }
 
-        if (effectiveRange.start.line === effectiveRange.end.line) {
-            return this._validateSameLineGhostText(cursorPos, doc, effectiveRange, effectiveText);
-        }
-
-        return { range: effectiveRange, newText: effectiveText };
+        return this._validateSameLineGhostText(cursorPos, doc, effectiveRange, effectiveText);
     }
 
     private _tryAdjustNextLineInsertion(
