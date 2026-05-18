@@ -160,7 +160,7 @@ export class NesWorkflow {
             const totalMs = Date.now() - t0;
             this._log.info(`[NES]  RESULT edit=${finalEdit.length}ch preview="${this._trunc(finalEdit, 100)}" total=${totalMs}ms`);
 
-            const result = this._buildResult(finalEdit, document, position, cacheEntry);
+            const result = this._buildResult(finalEdit, document, overridePosition ?? position, cacheEntry);
             return { editResult: result, promptPieces };
         } catch (err) {
             if ((err as { name?: string })?.name === 'AbortError') {
