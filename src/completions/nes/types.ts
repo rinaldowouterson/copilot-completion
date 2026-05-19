@@ -36,3 +36,15 @@ export interface LineRange0Based {
     startLine: number;
     endLineExclusive: number;
 }
+
+/** NES-specific InlineCompletionItem properties recognized by VS Code at runtime. */
+export interface NesCompletionItem extends vscode.InlineCompletionItem {
+    isInlineEdit?: boolean;
+    isInlineCompletion?: boolean;
+    showInlineEditMenu?: boolean;
+    jumpToPosition?: vscode.Position;
+    displayLocation?: {
+        range: vscode.Range;
+        label: string;
+    };
+}

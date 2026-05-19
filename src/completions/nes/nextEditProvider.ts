@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { IInstantiationService } from '../../di/instantiation';
 import { INesConfigProvider } from '../../config/nesConfig';
 import { ILogService } from '../shared/log/logService';
-import { NextEditResult } from './types';
+import { NesCompletionItem, NextEditResult } from './types';
 import { createServiceIdentifier } from '../../di/services';
 import { NesWorkflow } from './core/nesWorkflow';
 import { NextCursorPredictor } from './nextCursorPredictor';
@@ -13,6 +13,12 @@ export const INesProvider = createServiceIdentifier<INesProvider>('INesProvider'
 export interface INesProvider {
     readonly _serviceBrand: undefined;
     register(): vscode.Disposable;
+}
+
+/** InlineCompletionList subclass that enables forward stability for NES items. */
+class NesCompletionList extends vscode.InlineCompletionList {
+    /** Not declared on base type, but VS Code runtime reads this property. */
+    public readonly enableForwardStability = true;
 }
 
 export class NextEditProvider implements INesProvider, vscode.InlineCompletionItemProvider {
@@ -32,20 +38,18 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
     }
 
     register(): vscode.Disposable {
-        this._disposable = (vscode.languages as any).registerInlineCompletionItemProvider(
+        this._disposable = vscode.languages.registerInlineCompletionItemProvider(
             { pattern: '**' },
             this,
-            { groupId: 'nes', debounceDelayMs: 0 },
         );
 
         const configDisposable = this._config.onDidChangeEnabled(() => {
             this._log.info(`NES enabled changed to: ${this._config.enabled}`);
             if (this._disposable) { this._disposable.dispose(); }
             if (this._config.enabled) {
-                this._disposable = (vscode.languages as any).registerInlineCompletionItemProvider(
+                this._disposable = vscode.languages.registerInlineCompletionItemProvider(
                     { pattern: '**' },
                     this,
-                    { groupId: 'nes', debounceDelayMs: 0 },
                 );
             }
         });
@@ -133,14 +137,17 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         result: NextEditResult,
         document: vscode.TextDocument,
         cursorPosition: vscode.Position,
-    ): vscode.InlineCompletionList {
+    ): NesCompletionList {
         // 1. Cursor jump: create jump-to-position item (no insertText)
         if (result.jumpToPosition) {
-            const item = new vscode.InlineCompletionItem('', result.range);
-            (item as any).jumpToPosition = result.jumpToPosition;
-            (item as any).isInlineEdit = true;
-            (item as any).isInlineCompletion = false;
-            return new (vscode.InlineCompletionList as any)([item], { enableForwardStability: true });
+            const item: NesCompletionItem = {
+                insertText: '',
+                range: result.range,
+                jumpToPosition: result.jumpToPosition,
+                isInlineEdit: true,
+                isInlineCompletion: false,
+            };
+            return new NesCompletionList([item]);
         }
 
         // 2. Try to convert to inline (ghost text) suggestion
@@ -160,7 +167,7 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             && !isInlineCompletion
         ) {
             this._log.debug(`[NES]  suppressing cached suggestion — was inline, now not`);
-            return new (vscode.InlineCompletionList as any)([], { enableForwardStability: true });
+            return new NesCompletionList([]);
         }
 
         // 4. Mark cache entry as rendered inline
@@ -173,10 +180,16 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         const insertText = inline?.newText ?? result.edit;
 
         // 6. Build item
-        const item = new vscode.InlineCompletionItem(insertText, range);
+        const item: NesCompletionItem = {
+            insertText,
+            range,
+            isInlineEdit: !isInlineCompletion,
+            isInlineCompletion,
+            showInlineEditMenu: !isInlineCompletion || undefined,
+        };
 
         if (result.displayLocation) {
-            (item as any).displayLocation = result.displayLocation;
+            item.displayLocation = result.displayLocation;
         }
 
         if (result.cursorPrediction) {
@@ -187,10 +200,6 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             };
         }
 
-        (item as any).isInlineEdit = !isInlineCompletion;
-        (item as any).isInlineCompletion = isInlineCompletion;
-        (item as any).showInlineEditMenu = !isInlineCompletion || undefined;
-
-        return new (vscode.InlineCompletionList as any)([item], { enableForwardStability: true });
+        return new NesCompletionList([item]);
     }
 }
