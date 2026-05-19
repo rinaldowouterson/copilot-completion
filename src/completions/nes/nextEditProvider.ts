@@ -32,18 +32,20 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
     }
 
     register(): vscode.Disposable {
-        this._disposable = vscode.languages.registerInlineCompletionItemProvider(
+        this._disposable = (vscode.languages as any).registerInlineCompletionItemProvider(
             { pattern: '**' },
             this,
+            { groupId: 'nes', debounceDelayMs: 0 },
         );
 
         const configDisposable = this._config.onDidChangeEnabled(() => {
             this._log.info(`NES enabled changed to: ${this._config.enabled}`);
             if (this._disposable) { this._disposable.dispose(); }
             if (this._config.enabled) {
-                this._disposable = vscode.languages.registerInlineCompletionItemProvider(
+                this._disposable = (vscode.languages as any).registerInlineCompletionItemProvider(
                     { pattern: '**' },
                     this,
+                    { groupId: 'nes', debounceDelayMs: 0 },
                 );
             }
         });
@@ -131,12 +133,14 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         result: NextEditResult,
         document: vscode.TextDocument,
         cursorPosition: vscode.Position,
-    ): vscode.InlineCompletionItem[] {
+    ): vscode.InlineCompletionList {
         // 1. Cursor jump: create jump-to-position item (no insertText)
         if (result.jumpToPosition) {
             const item = new vscode.InlineCompletionItem('', result.range);
             (item as any).jumpToPosition = result.jumpToPosition;
-            return [item];
+            (item as any).isInlineEdit = true;
+            (item as any).isInlineCompletion = false;
+            return new (vscode.InlineCompletionList as any)([item], { enableForwardStability: true });
         }
 
         // 2. Try to convert to inline (ghost text) suggestion
@@ -147,18 +151,20 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             result.edit,
         );
 
+        const isInlineCompletion = !!inline;
+
         // 3. Gate: suppress if was previously shown as inline but now can't be
         if (
             this._config.mimicGhostTextBehavior
             && result.cacheEntry?.wasRenderedAsInlineSuggestion
-            && !inline
+            && !isInlineCompletion
         ) {
             this._log.debug(`[NES]  suppressing cached suggestion — was inline, now not`);
-            return [];
+            return new (vscode.InlineCompletionList as any)([], { enableForwardStability: true });
         }
 
         // 4. Mark cache entry as rendered inline
-        if (inline && result.cacheEntry) {
+        if (isInlineCompletion && result.cacheEntry) {
             result.cacheEntry.wasRenderedAsInlineSuggestion = true;
         }
 
@@ -181,6 +187,10 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             };
         }
 
-        return [item];
+        (item as any).isInlineEdit = !isInlineCompletion;
+        (item as any).isInlineCompletion = isInlineCompletion;
+        (item as any).showInlineEditMenu = !isInlineCompletion || undefined;
+
+        return new (vscode.InlineCompletionList as any)([item], { enableForwardStability: true });
     }
 }
