@@ -38,8 +38,26 @@ export class StringEdit {
         );
     }
 
+    applyToOffset(originalOffset: number): number {
+        let accumulatedDelta = 0;
+        const sorted = [...this.replacements].sort((a, b) => a.range.start - b.range.start);
+        for (const r of sorted) {
+            if (r.range.start <= originalOffset) {
+                if (originalOffset < r.range.endExclusive) {
+                    return r.range.start + accumulatedDelta;
+                }
+                accumulatedDelta += r.newText.length - r.range.length;
+            } else {
+                break;
+            }
+        }
+        return originalOffset + accumulatedDelta;
+    }
+
     applyToOffsetRange(range: OffsetRange): OffsetRange {
-        // Simplified stub - just return the range unchanged
-        return range;
+        return new OffsetRange(
+            this.applyToOffset(range.start),
+            this.applyToOffset(range.endExclusive),
+        );
     }
 }

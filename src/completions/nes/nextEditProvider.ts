@@ -72,7 +72,7 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         const requestUuid = `nes-${Date.now()}-${++_requestSeq}`;
 
         // Primary NES request
-        const { editResult, promptPieces } = await this._workflow.execute(document, position, token);
+        const { editResult, promptPieces } = await this._workflow.execute(document, position, false, token);
 
         if (editResult) {
             return this._toInlineItems(editResult, document, position, requestUuid);
@@ -88,7 +88,6 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             this._log.debug(`[NES]  NO_RESULT — cancelled before cursor prediction`);
             return undefined;
         }
-
         this._log.debug(`[NES]  NO_RESULT — attempting cursor prediction retry`);
 
         const predictionR = await this._cursorPredictor.predict(promptPieces, token);
@@ -102,28 +101,23 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
             this._log.debug(`[NES]  cursor prediction error: ${predictionR.err}`);
             return undefined;
         }
-
-        const prediction = predictionR.val;
-
-        if (prediction.kind === 'differentFile') {
-            this._log.debug(`[NES]  cross-file prediction not supported: ${prediction.filePath}`);
-            return undefined;
-        }
-
         // sameFile: retry NES at predicted position
-        this._log.debug(`[NES]  retry NES at predicted line ${prediction.lineNumber}`);
+        this._log.debug(`[NES]  retry NES at predicted line ${predictionR.val}`);
 
         const predictedPos = new vscode.Position(
-            Math.min(prediction.lineNumber, document.lineCount - 1),
+            Math.min(predictionR.val, document.lineCount - 1),
             0,
         );
 
         const { editResult: retryResult } = await this._workflow.execute(
-            document, position, token, predictedPos,
+            document, predictedPos, true, token
         );
 
         if (retryResult) {
-            retryResult.cursorPrediction = prediction;
+            retryResult.cursorPrediction = {
+                kind: 'sameFile',
+                lineNumber: predictionR.val
+            };
             return this._toInlineItems(retryResult, document, position, requestUuid);
         }
 

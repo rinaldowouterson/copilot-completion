@@ -1,3 +1,4 @@
+import * as vscode from 'vscode';
 import { OffsetRange } from './offsetRange';
 import { StringText } from './abstractText';
 import { StringEdit } from './stringEdit';
@@ -69,6 +70,7 @@ export interface RecentlyViewedDocumentsOpts {
 }
 
 export interface LintOptions {
+    enable: boolean;
     tagName: string;
     warnings: LintOptionWarning;
     showCode: LintOptionShowCode;
@@ -101,10 +103,11 @@ export interface PagedClippingOpts {
 export interface PromptOptions {
     promptingStrategy: PromptingStrategy;
     includePostScript: boolean;
+    includeEditCode: boolean;
     recentlyViewedDocuments: RecentlyViewedDocumentsOpts;
     currentFile: CurrentFileOptions;
     languageContext: LanguageContextOpts;
-    lintOptions?: LintOptions;
+    lintOptions: LintOptions;
     neighborFiles: NeighborFilesOpts;
     pagedClipping: PagedClippingOpts;
     diffHistory: DiffHistoryOptions;
@@ -114,20 +117,37 @@ export interface PromptOptions {
 // StatelessNextEditDocument
 // ========================================================================
 export class DocumentId {
-    static create(uriStr: string): DocumentId {
-        return new DocumentId(uriStr);
+    private static readonly _cache = new Map<string, DocumentId>();
+
+    static create(uri: string): DocumentId {
+        let doc = DocumentId._cache.get(uri);
+        if (!doc) {
+            doc = new DocumentId(uri);
+            DocumentId._cache.set(uri, doc);
+        }
+        return doc;
     }
 
-    constructor(
-        public readonly path: string,
-        public readonly fragment?: string,
-    ) { }
+    private readonly _parsedUri: vscode.Uri;
 
-    toUri(): { scheme: string; toString(): string } {
-        return {
-            scheme: 'file',
-            toString: () => this.path,
-        };
+    private constructor(public readonly uri: string) {
+        this._parsedUri = vscode.Uri.parse(uri);
+    }
+
+    get path(): string {
+        return this._parsedUri.path;
+    }
+
+    get fragment(): string {
+        return this._parsedUri.fragment;
+    }
+
+    toString(): string {
+        return this.uri;
+    }
+
+    toUri(): vscode.Uri {
+        return this._parsedUri;
     }
 }
 

@@ -14,6 +14,7 @@ export const IGhostConfigProvider = createServiceIdentifier<IGhostConfigProvider
 export interface IGhostConfigProvider {
     readonly _serviceBrand: undefined;
     get enabled(): boolean;
+    set enabled(value: boolean);
     get baseUrl(): string;
     get apiKey(): string;
     get model(): string;
@@ -32,8 +33,18 @@ export interface IGhostConfigProvider {
 export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
     readonly _serviceBrand: undefined;
 
+    private readonly _onDidChangeEnabled = new vscode.EventEmitter<void>();
+    private readonly _stateKey = 'ghost.enabled';
+
+    constructor(private readonly _context: vscode.ExtensionContext) {}
+
     get enabled(): boolean {
-        return vscode.workspace.getConfiguration().get<boolean>(ConfigKeys.Ghost.enabled, true);
+        return this._context.workspaceState.get<boolean>(this._stateKey, true);
+    }
+
+    set enabled(value: boolean) {
+        this._context.workspaceState.update(this._stateKey, value);
+        this._onDidChangeEnabled.fire();
     }
 
     get baseUrl(): string {
@@ -101,10 +112,6 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
     }
 
     onDidChangeEnabled(listener: () => void): vscode.Disposable {
-        return vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration(ConfigKeys.Ghost.enabled)) {
-                listener();
-            }
-        });
+        return this._onDidChangeEnabled.event(listener);
     }
 }

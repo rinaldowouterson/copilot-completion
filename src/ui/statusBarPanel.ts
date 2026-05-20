@@ -56,7 +56,11 @@ export class StatusBarPanel implements IStatusBarPanel {
         const active = [ghostOn && 'G', nesOn && 'N', ncpOn && 'C'].filter(Boolean).join('/');
         if (active) {
             this._statusBarItem.text = `$(sparkle) CC [${active}]`;
-            this._statusBarItem.tooltip = `GHOST: ${ghostOn ? 'ON' : 'OFF'}, NES: ${nesOn ? 'ON' : 'OFF'}, NCP: ${ncpOn ? 'ON' : 'OFF'}`;
+            this._statusBarItem.tooltip = [
+                ` ${ghostOn ? '✅' : '❌'} Ghost Inline Suggetion `,
+                ` ${nesOn ? '✅' : '❌'} Next Edit Suggestion `,
+                ` ${ncpOn ? '✅' : '❌'} Next Cursor Prediction `,
+            ].join('\n');
         } else {
             this._statusBarItem.text = `$(circle-slash) CC [OFF]`;
             this._statusBarItem.tooltip = 'CC Completion disabled';
@@ -68,58 +72,47 @@ export class StatusBarPanel implements IStatusBarPanel {
         const nesOn = this._nesConfig.enabled;
         const ncpOn = this._nesConfig.nextCursorPredictionEnabled;
 
-        const ghostLabel = `$(symbol-boolean) Ghost Inline Completion (GHOST): ${ghostOn ? 'ON' : 'OFF'}`;
-        const nesLabel = `$(symbol-boolean) Next Edit Suggestion (NES): ${nesOn ? 'ON' : 'OFF'}`;
-        const ncpLabel = `$(symbol-boolean) Next Cursor Prediction (NCP): ${ncpOn ? 'ON' : 'OFF'}`;
+        const ghostItem: vscode.QuickPickItem = { label: 'Ghost Inline Completion (GHOST)', picked: ghostOn };
+        const nesItem: vscode.QuickPickItem = { label: 'Next Edit Suggestion (NES)', picked: nesOn };
+        const ncpItem: vscode.QuickPickItem = {
+            label: 'Next Cursor Prediction (NCP)',
+            description: nesOn ? 'Requires NES enabled' : 'Disabled (requires NES)',
+            picked: ncpOn && nesOn,
+        };
 
-        const pick = await vscode.window.showQuickPick(
-            [
-                {
-                    label: ghostLabel,
-                    description: ghostOn ? 'Click to disable' : 'Click to enable',
-                    type: 'toggleGhost',
-                },
-                {
-                    label: nesLabel,
-                    description: nesOn ? 'Click to disable' : 'Click to enable',
-                    type: 'toggleNes',
-                },
-                {
-                    label: ncpLabel,
-                    description: ncpOn ? 'Click to disable' : 'Click to enable',
-                    type: 'toggleNcp',
-                },
-            ],
+        const picks = await vscode.window.showQuickPick(
+            [ghostItem, nesItem, ncpItem],
             {
+                canPickMany: true,
                 placeHolder: 'Toggle GHOST / NES / NCP completion features',
                 title: 'CC Completion',
             },
         );
 
-        if (!pick) return;
+        if (!picks) return;
 
-        if (pick.type === 'toggleGhost') {
-            await vscode.workspace.getConfiguration().update(
-                'cc-completion.ghost.enabled',
-                !ghostOn,
-                vscode.ConfigurationTarget.Global,
-            );
-            this._log.info(`GHOST: ${!ghostOn ? 'enabled' : 'disabled'}`);
-        } else if (pick.type === 'toggleNes') {
-            await vscode.workspace.getConfiguration().update(
-                'cc-completion.nes.enabled',
-                !nesOn,
-                vscode.ConfigurationTarget.Global,
-            );
-            this._log.info(`NES: ${!nesOn ? 'enabled' : 'disabled'}`);
-        } else if (pick.type === 'toggleNcp') {
-            await vscode.workspace.getConfiguration().update(
-                'cc-completion.nes.nextCursorPrediction.enabled',
-                !ncpOn,
-                vscode.ConfigurationTarget.Global,
-            );
-            this._log.info(`NCP: ${!ncpOn ? 'enabled' : 'disabled'}`);
+        const pickedSet = new Set(picks);
+        const newGhost = pickedSet.has(ghostItem);
+        const newNes = pickedSet.has(nesItem);
+        // NCP only active when NES is also picked
+        const newNcp = newNes && pickedSet.has(ncpItem);
+
+        if (newGhost !== ghostOn) {
+            this._ghostConfig.enabled = newGhost;
+            this._log.info(`GHOST: ${newGhost ? 'enabled' : 'disabled'}`);
         }
+        if (newNes !== nesOn) {
+            this._nesConfig.enabled = newNes;
+            this._log.info(`NES: ${newNes ? 'enabled' : 'disabled'}`);
+        }
+        if (newNes && newNcp !== ncpOn) {
+            this._nesConfig.nextCursorPredictionEnabled = newNcp;
+            this._log.info(`NCP: ${newNcp ? 'enabled' : 'disabled'}`);
+        }
+        if (!newNes && nesOn) {
+            this._log.info(`NCP: disabled (NES turned off)`);
+        }
+
         this._updateStatusBar();
     }
 }

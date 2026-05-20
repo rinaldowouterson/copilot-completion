@@ -18,19 +18,19 @@ import { CurrentDocument } from './xtabCurrentDocument';
 
 export class PromptPieces {
 	constructor(
-		public readonly currentDocument: CurrentDocument,
-		public readonly editWindowLinesRange: OffsetRange,
-		public readonly areaAroundEditWindowLinesRange: OffsetRange,
-		public readonly activeDoc: StatelessNextEditDocument,
-		public readonly xtabHistory: readonly IXtabHistoryEntry[],
-		public readonly taggedCurrentDocLines: readonly string[],
-		public readonly areaAroundCodeToEdit: string,
-		public readonly langCtx: LanguageContextResponse | undefined,
-		public readonly aggressivenessLevel: AggressivenessLevel,
-		public readonly lintErrors: LintErrors,
-		public readonly computeTokens: (s: string) => number,
-		public readonly opts: PromptOptions,
-		public readonly neighborSnippets?: readonly INeighborFileSnippet[],
+		public currentDocument: CurrentDocument,
+		public editWindowLinesRange: OffsetRange,
+		public areaAroundEditWindowLinesRange: OffsetRange,
+		public activeDoc: StatelessNextEditDocument,
+		public xtabHistory: readonly IXtabHistoryEntry[],
+		public taggedCurrentDocLines: readonly string[],
+		public areaAroundCodeToEdit: string,
+		public langCtx: LanguageContextResponse | undefined,
+		public aggressivenessLevel: AggressivenessLevel,
+		public lintErrors: LintErrors,
+		public computeTokens: (s: string) => number,
+		public opts: PromptOptions,
+		public neighborSnippets?: readonly INeighborFileSnippet[],
 	) {
 	}
 }
@@ -59,7 +59,7 @@ export function getUserPrompt(promptPieces: PromptPieces): UserPromptResult {
 
 	const postScript = promptPieces.opts.includePostScript ? getPostScript(opts.promptingStrategy, currentFilePath, aggressivenessLevel) : '';
 
-	const lintsWithNewLinePadding = opts.lintOptions ? `\n${lintErrors.getFormattedLintErrors(opts.lintOptions)}\n` : '';
+	const lintsWithNewLinePadding = opts.lintOptions && opts.lintOptions.enable ? `\n${lintErrors.getFormattedLintErrors(opts.lintOptions)}\n` : '';
 
 	const basePrompt = `${PromptTags.RECENT_FILES.start}
 ${recentlyViewedCodeSnippets}
@@ -74,59 +74,13 @@ ${PromptTags.EDIT_HISTORY.start}
 ${editDiffHistory}
 ${PromptTags.EDIT_HISTORY.end}`;
 
-	let mainPrompt: string;
-	switch (opts.promptingStrategy) {
-		case PromptingStrategy.PatchBased01:
-			mainPrompt = basePrompt;
-			break;
-		case PromptingStrategy.PatchBased02: {
-			const currentDocument = promptPieces.currentDocument;
-			const cursorLine = currentDocument.lineWithCursor();
-			const cursorLineWithTag = cursorLine.substring(0, currentDocument.cursorPosition.column - 1) + PromptTags.CURSOR + cursorLine.substring(currentDocument.cursorPosition.column - 1);
-			const lineNumberZeroBased = currentDocument.cursorPosition.lineNumber - 1;
-			let lineNumbering: string;
-			switch (opts.currentFile.includeLineNumbers) {
-				case IncludeLineNumbersOption.WithSpaceAfter:
-					lineNumbering = `${lineNumberZeroBased}| `;
-					break;
-				case IncludeLineNumbersOption.WithoutSpace:
-					lineNumbering = `${lineNumberZeroBased}|`;
-					break;
-				case IncludeLineNumbersOption.None:
-					lineNumbering = '';
-					break;
-				default:
-					assertNever(opts.currentFile.includeLineNumbers);
-			}
-			const lineWithCursorSnippet = [
-				PromptTags.CURSOR_LOCATION.start,
-				`${lineNumbering}${cursorLineWithTag}`,
-				PromptTags.CURSOR_LOCATION.end
-			].join('\n');
-			mainPrompt = basePrompt + `\n\n${lineWithCursorSnippet}`;
-			break;
-		}
-		default:
-			mainPrompt = basePrompt + `\n\n${areaAroundCodeToEdit}`;
-			break;
-	}
-
-	const includeBackticks = opts.promptingStrategy !== PromptingStrategy.Nes41Miniv3 &&
-		opts.promptingStrategy !== PromptingStrategy.Codexv21NesUnified &&
-		opts.promptingStrategy !== PromptingStrategy.PatchBased01 &&
-		opts.promptingStrategy !== PromptingStrategy.PatchBased02;
-
-	const packagedPrompt = includeBackticks ? wrapInBackticks(mainPrompt) : mainPrompt;
-	const packagedPromptWithRelatedInfo = addRelatedInformation(relatedInformation, packagedPrompt, opts.languageContext.traitPosition);
+	const mainPrompt = basePrompt +  ( opts.includeEditCode ? `\n\n${areaAroundCodeToEdit}` : "");
+	const packagedPromptWithRelatedInfo = addRelatedInformation(relatedInformation, mainPrompt, opts.languageContext.traitPosition);
 	const prompt = packagedPromptWithRelatedInfo + postScript;
 
 	const trimmedPrompt = prompt.trim();
 
 	return { prompt: trimmedPrompt, nDiffsInPrompt, diffTokensInPrompt, neighborSnippetsResult };
-}
-
-function wrapInBackticks(content: string) {
-	return `\`\`\`\n${content}\n\`\`\``;
 }
 
 function addRelatedInformation(relatedInformation: string, prompt: string, position: 'before' | 'after'): string {

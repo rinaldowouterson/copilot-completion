@@ -5,12 +5,14 @@ import { ILogService } from '../../shared/log/logService';
 import { CachedEdit, INextEditCache } from '../nextEditCache';
 import { NextEditResult } from '../types';
 import { PromptPieces } from '../promptCrafting';
+import { DocumentId } from '../stubs/types';
 import { PromptAssembler } from './promptAssembler';
 import { EditWindowResolver } from './editWindowResolver';
 import { EditResultAssembler } from './editResultAssembler';
 import { ResponsePipeline, ResponsePipelineContext } from '../response/responsePipeline';
 import { EditFilterChain } from '../response/editFilterChain';
-import { recordDocumentForDiffHistory } from '../diffHistoryForPrompt';
+import { NesHistoryTracker } from './nesHistoryTracker';
+
 
 export interface NesExecutionResult {
     editResult: NextEditResult | undefined;
@@ -25,6 +27,8 @@ export class NesWorkflow {
     private readonly _editFilterChain = new EditFilterChain();
     private readonly _resultAssembler: EditResultAssembler;
 
+    private readonly _historyTracker = new NesHistoryTracker();
+
     constructor(
         @INesConfigProvider private readonly _config: INesConfigProvider,
         @ILLMAdapterManager private readonly _llmManager: ILLMAdapterManager,
@@ -35,12 +39,15 @@ export class NesWorkflow {
         this._resultAssembler = new EditResultAssembler(this._editWindowResolver);
     }
 
+    dispose(): void {
+        this._historyTracker.dispose();
+    }
+
     async execute(
         document: vscode.TextDocument,
         position: vscode.Position,
+        lintEnable: boolean,
         token?: vscode.CancellationToken,
-        /** If provided, skip edit window resolution and use this position */
-        overridePosition?: vscode.Position,
     ): Promise<NesExecutionResult> {
         const t0 = Date.now();
         this._log.info(`[NES]  ===== START =====`);
@@ -65,7 +72,7 @@ export class NesWorkflow {
                 return { editResult: undefined };
             }
             const result = this._buildResultFromCached(cached, document, position);
-            recordDocumentForDiffHistory(document.uri.toString(), document.getText().replace(/\r\n/g, '\n').split('\n'));
+            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start}, end =${result.range.end}), cursorAfterEdit = ${result.cursorAfterEdit}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
             return { editResult: result };
         }
         this._log.debug(`[NES]  cache_miss [${Date.now() - t1}ms]`);
@@ -78,7 +85,9 @@ export class NesWorkflow {
         // Step 2: Build prompt
         let promptAssembly;
         try {
-            promptAssembly = this._promptAssembler.assemble(document, position, overridePosition);
+            const xtabHistory = this._historyTracker.getHistory(DocumentId.create(document.uri.toString()));
+            promptAssembly = this._promptAssembler.assemble(document, position,lintEnable, xtabHistory);
+            this._log.debug('\n' + promptAssembly.userPrompt);
         } catch {
             this._log.info(`[NES]  SKIP — prompt too large`);
             return { editResult: undefined };
@@ -118,7 +127,7 @@ export class NesWorkflow {
             );
             const networkMs = Date.now() - t4;
             this._log.info(`[NES]  NETWORK finish=${response.finishReason} text=${response.text.length}ch usage=${JSON.stringify(response.usage)} [${networkMs}ms]`);
-            this._log.debug('\n' + response.text);
+            this._log.info('\n' + response.text);
 
             // Step 4: Response pipeline — Phase 1 (boundary markers + cursor tag stripping)
             const editWindowHadCursorTag = promptAssembly.editWindowLines.some(l => l.includes('<|cursor|>'));
@@ -145,6 +154,7 @@ export class NesWorkflow {
                 undefined,
                 this._config.suffixOverlapThreshold,
                 this._config.suffixOverlapType,
+                this._log
             );
 
             // Step 7: Cache result
@@ -164,9 +174,8 @@ export class NesWorkflow {
             result.cacheEntry = cacheEntry;
 
             const totalMs = Date.now() - t0;
-            this._log.info(`[NES]  RESULT edit=${result.edit.length}ch preview="${this._trunc(result.edit, 100)}" total=${totalMs}ms`);
-
-            recordDocumentForDiffHistory(document.uri.toString(), document.getText().replace(/\r\n/g, '\n').split('\n'));
+            this._log.info(`[NES]  RESULT edit=${result.edit.length}ch total=${totalMs}ms`);
+            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start}, end =${result.range.end}), cursorAfterEdit = ${result.cursorAfterEdit}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
 
             return { editResult: result, promptPieces: promptAssembly.promptPieces };
         } catch (err) {
@@ -194,6 +203,7 @@ export class NesWorkflow {
             cached,
             this._config.suffixOverlapThreshold,
             this._config.suffixOverlapType,
+            this._log
         );
     }
 

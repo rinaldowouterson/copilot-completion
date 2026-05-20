@@ -3,13 +3,11 @@ import { IInstantiationService } from '../../di/instantiation';
 import { ILLMAdapterManager } from '../shared/llm/llmAdapter';
 import { INesConfigProvider } from '../../config/nesConfig';
 import { ILogService } from '../shared/log/logService';
-import { PromptingStrategy, IncludeLineNumbersOption } from './stubs/types';
+import { PromptingStrategy, IncludeLineNumbersOption, PromptOptions, LintOptionWarning, LintOptionShowCode } from './stubs/types';
 import { constructTaggedFile, getUserPrompt, PromptPieces } from './promptCrafting';
-import { CursorJumpPrediction } from './types';
 import { OffsetRange } from './stubs/offsetRange';
 import { Result } from './stubs/result';
 
-const SYSTEM_MSG = 'Your task is to predict the line number where the developer is most likely to make their next edit. If you jump in the current file, just output the line number. If you want to jump to another file, output the filepath (relative to workspace root), colon, then line number. Output no explanation.';
 
 export class NextCursorPredictor {
     private _isDisabled = false;
@@ -31,8 +29,10 @@ export class NextCursorPredictor {
     async predict(
         promptPieces: PromptPieces,
         token?: vscode.CancellationToken,
-    ): Promise<Result<CursorJumpPrediction, string>> {
+    ): Promise<Result<number, string>> {
         const computeTokens = (s: string) => Math.floor(s.length / 4);
+
+        promptPieces.opts.lintOptions.enable = true;
 
         const taggedR = constructTaggedFile(
             promptPieces.currentDocument,
@@ -63,6 +63,19 @@ export class NextCursorPredictor {
 
         const { clippedTaggedCurrentDoc, areaAroundCodeToEdit } = taggedR.val;
 
+        const promptOptions: PromptOptions = {
+            promptingStrategy: PromptingStrategy.Xtab275,
+            includePostScript: false,
+            includeEditCode: false,
+            recentlyViewedDocuments: { maxTokens: 2000, nDocuments: 10, includeViewedFiles: true, clippingStrategy: 'TopToBottom' as any, includeLineNumbers: IncludeLineNumbersOption.None },
+            currentFile: { includeCursorTag: true, includeLineNumbers: IncludeLineNumbersOption.None, maxTokens: 4000, prioritizeAboveCursor: true, includeTags: false },
+            languageContext: { maxTokens: 2000, traitPosition: 'before' },
+            lintOptions: { enable: true, tagName: 'diagnostics', warnings: LintOptionWarning.NO, showCode: LintOptionShowCode.NO, maxLints: 10, maxLineDistance: 50, nRecentFiles: 3 },
+            neighborFiles: { enabled: false, maxTokens: 2000 },
+            pagedClipping: { pageSize: 50 },
+            diffHistory: { onlyForDocsInPrompt: true, maxTokens: 2000, nEntries: 10, useRelativePaths: true },
+        };
+
         const newPromptPieces = new PromptPieces(
             promptPieces.currentDocument,
             promptPieces.editWindowLinesRange,
@@ -75,13 +88,11 @@ export class NextCursorPredictor {
             promptPieces.aggressivenessLevel,
             promptPieces.lintErrors,
             computeTokens,
-            {
-                ...promptPieces.opts,
-                includePostScript: false,
-            },
+            promptOptions
         );
 
         const { prompt: userMessage } = getUserPrompt(newPromptPieces);
+        this._log.debug('\n' + userMessage);
 
         try {
             const endpoint = this._config.supportedEndpoint;
@@ -92,11 +103,17 @@ export class NextCursorPredictor {
             const response = await adapter.send(
                 {
                     messages: [
-                        { role: 'system', content: SYSTEM_MSG },
-                        { role: 'user', content: userMessage },
+                        { 
+                            role: 'system', 
+                            content:  'Your task is to predict the line number where the developer is most likely to make their next edit. **just output the line number**.'
+                        },
+                        { role: 'user', content: userMessage + '\n\n **just output the line int number where the developer will make their next edit.**' },
                     ],
-                    max_tokens: 64,
+                    max_tokens: this._config.maxOutputTokens,
                     temperature: 0,
+                    n:1,
+                    presence_penalty: this._config.presencePenalty,
+                    frequency_penalty: this._config.frequencyPenalty
                 },
                 abortController.signal,
             );
@@ -106,8 +123,14 @@ export class NextCursorPredictor {
             if (response.text.trim() === '') {
                 return Result.error('emptyResponse');
             }
+            this._log.info(`predict next line: ${response.text}`);
 
-            return this._parseResponse(response.text.trim(), clippedTaggedCurrentDoc.keptRange);
+            const lineNumber = parseInt(response.text.trim(), 10);
+            if(isNaN(lineNumber) || lineNumber < 0){
+                return Result.error('line number is not positive number');
+            }
+
+            return Result.ok(lineNumber);
         } catch (err: unknown) {
             if ((err as { name?: string })?.name === 'AbortError') {
                 return Result.error('aborted');
@@ -122,32 +145,5 @@ export class NextCursorPredictor {
             }
             return Result.error(`fetchError:${msg}`);
         }
-    }
-
-    private _parseResponse(trimmed: string, keptRange: OffsetRange): Result<CursorJumpPrediction, string> {
-        const lineNumber = parseInt(trimmed, 10);
-        if (!isNaN(lineNumber) && String(lineNumber) === trimmed) {
-            if (lineNumber < 0) {
-                return Result.error('negativeLineNumber');
-            }
-            if (lineNumber < keptRange.start || keptRange.endExclusive <= lineNumber) {
-                return Result.error('modelNotSeenLineNumber');
-            }
-            return Result.ok({ kind: 'sameFile', lineNumber });
-        }
-
-        const lastColonIdx = trimmed.lastIndexOf(':');
-        if (lastColonIdx <= 0) {
-            return Result.error('gotNaN');
-        }
-
-        const filePath = trimmed.substring(0, lastColonIdx).trim();
-        const crossLine = parseInt(trimmed.substring(lastColonIdx + 1), 10);
-
-        if (isNaN(crossLine) || crossLine < 0 || filePath.length === 0) {
-            return Result.error('crossFileInvalidLineNumber');
-        }
-
-        return Result.ok({ kind: 'differentFile', filePath, lineNumber: crossLine });
     }
 }

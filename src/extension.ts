@@ -41,9 +41,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Build DI container
     const builder = new InstantiationServiceBuilder();
 
-    // === Config (direct instances) ===
-    const ghostConfig = new VSCodeGhostConfigProvider();
-    const nesConfig = new VSCodeNesConfigProvider();
+    // === Config (direct instances, with context for workspaceState) ===
+    const ghostConfig = new VSCodeGhostConfigProvider(context);
+    const nesConfig = new VSCodeNesConfigProvider(context);
     builder.define(IGhostConfigProvider, ghostConfig);
     builder.define(INesConfigProvider, nesConfig);
 

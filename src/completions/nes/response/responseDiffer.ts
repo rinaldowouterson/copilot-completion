@@ -76,6 +76,15 @@ export class ResponseDiffer {
                     insertLines,
                 ));
                 respIdx = responseLines.length;
+            } else if (newLines.length > 0) {
+                // Both sides exhausted with accumulated newLines that never re-aligned
+                edits.push(new LineReplacement(
+                    {
+                        startLineNumber: divergenceStart + 1,
+                        endLineNumberExclusive: origIdx + 1,
+                    },
+                    newLines,
+                ));
             }
         }
 

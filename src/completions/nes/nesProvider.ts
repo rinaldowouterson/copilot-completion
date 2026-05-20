@@ -27,7 +27,7 @@ export class NesProvider {
         position: vscode.Position,
         token?: vscode.CancellationToken,
     ): Promise<NextEditResult | undefined> {
-        const { editResult } = await this._workflow.execute(document, position, token);
+        const { editResult } = await this._workflow.execute(document, position, false, token);
         return editResult;
     }
 }

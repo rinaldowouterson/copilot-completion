@@ -1,5 +1,0 @@
-export const xtab275SystemPrompt = "Predict the next code edit based on user context, following Microsoft content policies and avoiding copyright violations. If a request may breach guidelines, reply: 'Sorry, I can't assist with that.'";
-
-export function pickSystemPrompt(): string {
-    return xtab275SystemPrompt;
-}

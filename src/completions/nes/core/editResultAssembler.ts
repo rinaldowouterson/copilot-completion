@@ -5,6 +5,7 @@ import { ResponseDiffer } from '../response/responseDiffer';
 import { LineReplacement } from '../response/lineReplacement';
 import { EditWindowResolver } from './editWindowResolver';
 import { TrimNESResponseSuffixOverlap } from '../suffixOverlapTrim';
+import { ILogService } from '../../shared/log/logService';
 
 export class EditResultAssembler {
     private readonly _responseDiffer = new ResponseDiffer();
@@ -22,6 +23,7 @@ export class EditResultAssembler {
      * @param cacheEntry    Optional cache entry for the result reference
      * @param overlapThreshold Similarity threshold for suffix overlap trimming (Phase 6)
      * @param overlapType      Overlap detection type: "low" or "high" (Phase 6)
+     * @param logger
      */
     assemble(
         responseLines: string[],
@@ -30,6 +32,7 @@ export class EditResultAssembler {
         cacheEntry?: CachedEdit,
         overlapThreshold: number = 0.85,
         overlapType: 'low' | 'high' = 'high',
+        logger?: ILogService
     ): NextEditResult {
         const documentText = document.getText().replaceAll("\r\n","\n");
         const documentLines = documentText.split('\n');
@@ -66,19 +69,24 @@ export class EditResultAssembler {
 
         const trimmer = new TrimNESResponseSuffixOverlap(overlapThreshold, overlapType);
         const overlapCount = trimmer.calculateOverlap(edit.newLines, suffixLines);
+        logger?.info(`overlap count : ${overlapCount}`)
         if (overlapCount > 0) {
             const trimmedNewLines = edit.newLines.slice(0, edit.newLines.length - overlapCount);
-            const trimmedEnd = docLineRange.startLineNumber + trimmedNewLines.length;
 
-            const trimmedReplacement = new LineReplacement(
-                {
-                    startLineNumber: docLineRange.startLineNumber,
-                    endLineNumberExclusive: trimmedEnd,
-                },
-                trimmedNewLines,
-            );
-
-            edit = trimmedReplacement;
+            // When the entire edit was suffix duplication, treat as no-op
+            if (trimmedNewLines.length > 0) {
+                const trimmedEnd = docLineRange.startLineNumber + trimmedNewLines.length;
+                const trimmedReplacement = new LineReplacement(
+                    {
+                        startLineNumber: docLineRange.startLineNumber,
+                        endLineNumberExclusive: trimmedEnd,
+                    },
+                    trimmedNewLines,
+                );
+                edit = trimmedReplacement;
+            } else {
+                return this._emptyEditResult(document, position, ewRange, originalLines.join('\n'), cacheEntry);
+            }
         }
 
         // Build final result: convert LineReplacement to vscode.Range
@@ -86,7 +94,15 @@ export class EditResultAssembler {
 
         // Compute character-level edit text for single-line edits
         let editText: string;
-        if (edit.isSingleLineEdit) {
+        if (edit.isInsertion) {
+            if (edit.lineRange.startLineNumber >= document.lineCount) {
+                // Insert at end of document: prepend newline so lines start on their own line
+                editText = '\n' + edit.newLines.join('\n');
+            } else {
+                // Insert between lines: append newline so following line stays separate
+                editText = edit.newLines.join('\n') + '\n';
+            }
+        } else if (edit.isSingleLineEdit) {
             const lineIdx = Math.max(0, edit.lineRange.startLineNumber);
             const origLine = document.lineAt(lineIdx).text;
             const newLine = edit.newLines[0];
@@ -151,9 +167,16 @@ export class EditResultAssembler {
 
 function lineReplacementToRange(edit: LineReplacement, document: vscode.TextDocument): vscode.Range {
     if (edit.isInsertion) {
-        const line = Math.min(edit.lineRange.startLineNumber, document.lineCount - 1);
-        const lineText = document.lineAt(line).text;
-        const pos = new vscode.Position(line, lineText.length);
+        const insertLine = edit.lineRange.startLineNumber;
+        if (insertLine >= document.lineCount) {
+            // Insert at end of document — position after last line
+            const lastLine = document.lineCount - 1;
+            const lastLineLen = document.lineAt(lastLine).text.length;
+            const pos = new vscode.Position(lastLine, lastLineLen);
+            return new vscode.Range(pos, pos);
+        }
+        // Insert between lines — position at start of the line at insertLine
+        const pos = new vscode.Position(insertLine, 0);
         return new vscode.Range(pos, pos);
     }
     if (edit.isDeletion) {

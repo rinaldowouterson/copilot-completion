@@ -20,6 +20,7 @@ export const INesConfigProvider = createServiceIdentifier<INesConfigProvider>('I
 export interface INesConfigProvider {
     readonly _serviceBrand: undefined;
     get enabled(): boolean;
+    set enabled(value: boolean);
     get baseUrl(): string;
     get apiKey(): string;
     get model(): string;
@@ -32,6 +33,7 @@ export interface INesConfigProvider {
     get frequencyPenalty(): number;
     get stream(): boolean;
     get nextCursorPredictionEnabled(): boolean;
+    set nextCursorPredictionEnabled(value: boolean);
     get mimicGhostTextBehavior(): boolean;
     onDidChangeEnabled(listener: () => void): vscode.Disposable;
 }
@@ -39,8 +41,32 @@ export interface INesConfigProvider {
 export class VSCodeNesConfigProvider implements INesConfigProvider {
     readonly _serviceBrand: undefined;
 
+    private readonly _onDidChangeEnabled = new vscode.EventEmitter<void>();
+    private readonly _enabledKey = 'nes.enabled';
+    private readonly _ncpKey = 'nes.nextCursorPredictionEnabled';
+
+    constructor(private readonly _context: vscode.ExtensionContext) {}
+
     get enabled(): boolean {
-        return vscode.workspace.getConfiguration().get<boolean>(ConfigKeys.Nes.enabled, true);
+        return this._context.workspaceState.get<boolean>(this._enabledKey, true);
+    }
+
+    set enabled(value: boolean) {
+        this._context.workspaceState.update(this._enabledKey, value);
+        if (!value) {
+            // Disable cursor prediction when NES is turned off
+            this._context.workspaceState.update(this._ncpKey, false);
+        }
+        this._onDidChangeEnabled.fire();
+    }
+
+    get nextCursorPredictionEnabled(): boolean {
+        return this._context.workspaceState.get<boolean>(this._ncpKey, false);
+    }
+
+    set nextCursorPredictionEnabled(value: boolean) {
+        this._context.workspaceState.update(this._ncpKey, value);
+        this._onDidChangeEnabled.fire();
     }
 
     get baseUrl(): string {
@@ -106,21 +132,12 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
             .get<boolean>(ConfigKeys.Nes.stream, true);
     }
 
-    get nextCursorPredictionEnabled(): boolean {
-        return vscode.workspace.getConfiguration()
-            .get<boolean>(ConfigKeys.Nes.nextCursorPredictionEnabled, false);
-    }
-
     get mimicGhostTextBehavior(): boolean {
         return vscode.workspace.getConfiguration()
             .get<boolean>(ConfigKeys.Nes.mimicGhostTextBehavior, false);
     }
 
     onDidChangeEnabled(listener: () => void): vscode.Disposable {
-        return vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration(ConfigKeys.Nes.enabled)) {
-                listener();
-            }
-        });
+        return this._onDidChangeEnabled.event(listener);
     }
 }
