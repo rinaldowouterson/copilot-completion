@@ -4,7 +4,7 @@ export enum ContextKind {
     File = 'file',
 }
 
-export interface SnippetContext {
+interface SnippetContext {
     kind: ContextKind.Snippet;
     value: string;
     uri: { toString(): string };
@@ -16,7 +16,7 @@ export interface TraitContext {
     value: string;
 }
 
-export interface LanguageContextItem {
+interface LanguageContextItem {
     context: SnippetContext | TraitContext;
     onTimeout: boolean;
 }

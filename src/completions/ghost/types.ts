@@ -6,17 +6,6 @@ export interface GhostCompletion {
     isMiddleOfTheLine: boolean;
 }
 
-export interface CompletionResult {
-    completion: GhostCompletion;
-    isMiddleOfTheLine: boolean;
-    suffixCoverage: number;
-}
-
-export interface GhostTextOptions {
-    isSpeculative: boolean;
-    delay: number;
-}
-
 export interface DiagnosticSummary {
     line: number;
     severity: 'error' | 'warning';

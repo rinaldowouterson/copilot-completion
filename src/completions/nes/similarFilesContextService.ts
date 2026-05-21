@@ -1,7 +1,4 @@
-export interface LineRange0Based {
-    startLine: number;
-    endLineExclusive: number;
-}
+import { LineRange0Based } from './types';
 
 /**
  * A neighbor-file snippet selected via Jaccard similarity, ready to be

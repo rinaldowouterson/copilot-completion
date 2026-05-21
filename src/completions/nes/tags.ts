@@ -37,19 +37,3 @@ export namespace PromptTags {
         return createTag(tagName);
     }
 }
-
-export namespace ResponseTags {
-    export const NO_EDIT = '<NO_EDIT>';
-
-    export const NO_CHANGE = {
-        start: '<NO_CHANGE>'
-    };
-    export const EDIT = {
-        start: '<EDIT>',
-        end: '</EDIT>'
-    };
-    export const INSERT = {
-        start: '<INSERT>',
-        end: '</INSERT>'
-    };
-}
