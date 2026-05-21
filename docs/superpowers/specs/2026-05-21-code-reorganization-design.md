@@ -5,7 +5,7 @@
 
 ## Goal
 
-Reorganize the `cc-completion` VSCode extension codebase: consolidate scattered definitions, move common code to shared folders, group module code together, delete unused code, follow OOP design principles and patterns. **Functionality must remain unchanged.**
+Reorganize the `cc-completion` VSCode extension codebase: consolidate scattered definitions, merge trivial files, move common code to shared folders, group module code together, delete unused code, follow OOP design principles and patterns. **Functionality must remain unchanged.**
 
 ## Target Directory Structure
 
@@ -13,7 +13,7 @@ Reorganize the `cc-completion` VSCode extension codebase: consolidate scattered 
 src/
 ├── common/                              # Shared base utilities
 │   ├── async.ts                         #  ← base/common/async.ts
-│   ├── errors.ts                        #  ← base/common/errors.ts
+│   ├── errors.ts                        #  ← base/common/errors.ts + nes/stubs/errors.ts (merged)
 │   ├── event.ts                         #  ← base/common/event.ts
 │   ├── lifecycle.ts                     #  ← base/common/lifecycle.ts
 │   ├── linkedList.ts                    #  ← base/common/linkedList.ts
@@ -48,25 +48,23 @@ src/
 │   │   └── log/
 │   │       └── logService.ts
 │   │
-│   ├── ghost/                           # GHOST module (unused files removed)
-│   │   ├── types.ts
-│   │   ├── resultType.ts
+│   ├── ghost/                           # GHOST module
+│   │   ├── types.ts                     #  ← types.ts + resultType.ts (merged)
+│   │   ├── ghostTextState.ts            #  ← current.ts + last.ts (merged)
 │   │   ├── asyncCompletions.ts
 │   │   ├── blockTrimmer.ts
 │   │   ├── completionsCache.ts
-│   │   ├── current.ts
 │   │   ├── ghostTextComputer.ts
 │   │   ├── ghostTextProvider.ts
 │   │   ├── inlineCompletion.ts
 │   │   ├── inlineSuggestion.ts
-│   │   ├── last.ts
 │   │   ├── promptFactory.ts
 │   │   ├── radix.ts
 │   │   ├── recentEditsProvider.ts
 │   │   └── multiline/
 │   │       └── ... (unchanged)
 │   │
-│   └── nes/                             # NES module (unused files removed, general utils extracted)
+│   └── nes/                             # NES module
 │       ├── types.ts
 │       ├── nextEditProvider.ts
 │       ├── nextEditCache.ts
@@ -76,7 +74,7 @@ src/
 │       ├── xtabCurrentDocument.ts
 │       ├── lintErrors.ts
 │       ├── recentFilesForPrompt.ts
-│       ├── similarFilesContextService.ts
+│       ├── similarFilesContextService.ts #  ← LineRange0Based removed (import from types.ts)
 │       ├── nextCursorPredictor.ts
 │       ├── diffHistoryForPrompt.ts
 │       ├── stubs/                       # NES-specific stubs only
@@ -87,8 +85,7 @@ src/
 │       │   ├── position.ts
 │       │   ├── positionToOffsetImpl.ts
 │       │   ├── stringEdit.ts
-│       │   ├── types.ts
-│       │   └── errors.ts
+│       │   └── types.ts
 │       ├── core/
 │       │   ├── nesWorkflow.ts
 │       │   ├── promptAssembler.ts
@@ -124,12 +121,21 @@ src/
 | `nes/editIntent.ts` | Test-only reference |
 | `nes/responseFormatHandlers.ts` | Test-only reference |
 
-### Test files (3)
+### Test files (2)
 
 | File | Reason |
 |---|---|
 | `test/nes/editRebase.test.ts` | Source file deleted |
 | `test/nes/responseFormatHandlers.test.ts` | Source files deleted (editIntent.ts + responseFormatHandlers.ts) |
+
+### After-merge deletions (files consumed by merge)
+
+| File | Merged into |
+|---|---|
+| `ghost/resultType.ts` | `ghost/types.ts` |
+| `ghost/last.ts` | `ghost/ghostTextState.ts` (renamed from current.ts) |
+| `ghost/current.ts` | `ghost/ghostTextState.ts` (renamed, absorbs last.ts) |
+| `nes/stubs/errors.ts` | `common/errors.ts` |
 
 ## Files to Move
 
@@ -141,28 +147,49 @@ src/
 | `nes/stubs/result.ts` | `src/completions/nes/stubs/` | `src/common/` | General-purpose utility |
 | `nes/suffixOverlapTrim.ts` | `src/completions/nes/` | `src/common/` | Shared by GHOST and NES |
 
+## Files to Merge (content consolidation)
+
+| Source | Target | Detail |
+|---|---|---|
+| `ghost/resultType.ts` | `ghost/types.ts` | Move `ResultType` enum into `types.ts`. Both are GHOST type definition files. |
+| `ghost/current.ts` + `ghost/last.ts` | `ghost/ghostTextState.ts` | Merge `CurrentGhostText` class and `LastGhostText` class into one file. Both used together by `ghostTextComputer.ts` and `inlineCompletion.ts`. |
+| `nes/stubs/errors.ts` | `common/errors.ts` | Move `BugIndicatingError` class and `illegalArgument()` into `common/errors.ts` (which already has `illegalState()`). All are general-purpose error utilities. |
+
 ## Duplicate Definitions to Consolidate
 
-- `LineRange0Based` is defined in both `similarFilesContextService.ts` and `types.ts`. The version in `similarFilesContextService.ts` is unused externally. Keep the one in `types.ts`.
+- `LineRange0Based` is defined identically in both `similarFilesContextService.ts` and `types.ts`. Remove from `similarFilesContextService.ts`, import from `types.ts` instead.
 
-## Unused Named Exports to Remove
+## Unused Exports to Remove
 
 | Export | File | Reason |
 |---|---|---|
-| `ResponseTags` | `tags.ts` | Zero references |
-| `SnippetContext` | `stubs/languageContext.ts` | Zero explicit imports (internal type only) |
-| `LanguageContextItem` | `stubs/languageContext.ts` | Zero explicit imports (internal type only) |
+| `ResponseTags` | `nes/tags.ts` | Zero references anywhere |
+| `CompletionResult` | `ghost/types.ts` | Zero references anywhere |
+| `GhostTextOptions` | `ghost/types.ts` | Zero references anywhere |
+| `SnippetContext` | `nes/stubs/languageContext.ts` | Zero explicit imports (internal type only) |
+| `LanguageContextItem` | `nes/stubs/languageContext.ts` | Zero explicit imports (internal type only) |
 
 ## Import Path Updates
 
-Files affected by the restructuring will have their imports updated. Key impacts:
+Files affected by the restructuring will have their imports updated:
 
-- `di/instantiation.ts` — `base/common/` → `common/`
-- `di/instantiationService.ts` — `base/common/` → `common/`
-- All files importing from `nes/stubs/arrays`, `nes/stubs/assert`, `nes/stubs/result` — updated to `common/`
-- `ghost/ghostTextComputer.ts` — `nes/suffixOverlapTrim` → `common/suffixOverlapTrim`
-- `nes/core/editResultAssembler.ts` — `../suffixOverlapTrim` → `common/suffixOverlapTrim`
-- `extension.ts` — remove `nesProvider` import, update moved file imports
+| Affected file | Change |
+|---|---|
+| `di/instantiation.ts` | `base/common/lifecycle` → `common/lifecycle` |
+| `di/instantiationService.ts` | `base/common/*` → `common/*` |
+| `di/services.ts` | `./instantiation` → same (no change needed) |
+| `nes/diffHistoryForPrompt.ts` | `./stubs/arrays` → `common/arrays` |
+| `nes/recentFilesForPrompt.ts` | `./stubs/arrays` → `common/arrays` |
+| `nes/promptCrafting.ts` | `./stubs/arrays` → `common/arrays`, `./stubs/assert` → `common/assert`, `./stubs/result` → `common/result`, `./stubs/errors` → `common/errors` |
+| `nes/nextCursorPredictor.ts` | `./stubs/result` → `common/result` |
+| `nes/xtabCurrentDocument.ts` | `./stubs/errors` → `common/errors` |
+| `nes/recentFilesForPrompt.ts` | `./stubs/errors` → `common/errors` |
+| `ghost/ghostTextComputer.ts` | `./current` → `./ghostTextState`, `./last` → removed, `./resultType` → `./types`, `../nes/suffixOverlapTrim` → `common/suffixOverlapTrim` |
+| `ghost/inlineCompletion.ts` | `./current` → `./ghostTextState`, `./last` → removed |
+| `nes/core/editResultAssembler.ts` | `../suffixOverlapTrim` → `common/suffixOverlapTrim` |
+| `nes/similarFilesContextService.ts` | remove local `LineRange0Based`, import from `../types` |
+| `extension.ts` | remove `nesProvider` import, remove `./completions/nes/nesProvider` line |
+| Test files | Update paths matching source moves |
 
 ## Design Patterns (Existing, Preserved)
 
