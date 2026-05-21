@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { OffsetRange } from '../../../completions/nes/stubs/offsetRange';
-import { Result } from '../../../completions/nes/stubs/result';
+import { Result } from '../../../common/result';
 
 // Test parseResponse indirectly by testing the key validation logic
 // Since _parseResponse is private, we test the parsing invariants directly.

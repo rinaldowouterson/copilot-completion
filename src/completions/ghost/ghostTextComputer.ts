@@ -10,7 +10,7 @@ import { CurrentGhostText } from './current';
 import { LastGhostText } from './last';
 import { IAsyncCompletionsManager } from './asyncCompletions';
 import { TerseBlockTrimmer, VerboseBlockTrimmer } from './blockTrimmer';
-import { TrimNESResponseSuffixOverlap } from '../nes/suffixOverlapTrim';
+import { TrimNESResponseSuffixOverlap } from '../../common/suffixOverlapTrim';
 import { DiagnosticSummary, GhostCompletion } from './types';
 import { ResultType } from './resultType';
 import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';

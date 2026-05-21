@@ -5,15 +5,15 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { GlobalIdleValue } from '../base/common/async';
-import { Event } from '../base/common/event';
-import { illegalState } from '../base/common/errors';
-import { DisposableStore, dispose, IDisposable, isDisposable, toDisposable } from '../base/common/lifecycle';
+import { GlobalIdleValue } from '../common/async';
+import { Event } from '../common/event';
+import { illegalState } from '../common/errors';
+import { DisposableStore, dispose, IDisposable, isDisposable, toDisposable } from '../common/lifecycle';
 import { SyncDescriptor, SyncDescriptor0 } from './descriptors';
 import { Graph } from './graph';
 import { GetLeadingNonServiceArgs, IInstantiationService, ServiceIdentifier, ServicesAccessor, _util } from './instantiation';
 import { ServiceCollection } from './serviceCollection';
-import { LinkedList } from '../base/common/linkedList';
+import { LinkedList } from '../common/linkedList';
 
 // TRACING
 const _enableAllTracing = false

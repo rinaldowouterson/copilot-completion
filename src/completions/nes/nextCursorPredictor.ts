@@ -6,7 +6,7 @@ import { ILogService } from '../shared/log/logService';
 import { PromptingStrategy, IncludeLineNumbersOption, PromptOptions, LintOptionWarning, LintOptionShowCode } from './stubs/types';
 import { constructTaggedFile, getUserPrompt, PromptPieces } from './promptCrafting';
 import { OffsetRange } from './stubs/offsetRange';
-import { Result } from './stubs/result';
+import { Result } from '../../common/result';
 
 
 export class NextCursorPredictor {

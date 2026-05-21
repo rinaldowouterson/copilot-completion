@@ -4,7 +4,7 @@ import { CachedEdit } from '../nextEditCache';
 import { ResponseDiffer } from '../response/responseDiffer';
 import { LineReplacement } from '../response/lineReplacement';
 import { EditWindowResolver } from './editWindowResolver';
-import { TrimNESResponseSuffixOverlap } from '../suffixOverlapTrim';
+import { TrimNESResponseSuffixOverlap } from '../../../common/suffixOverlapTrim';
 import { ILogService } from '../../shared/log/logService';
 
 export class EditResultAssembler {

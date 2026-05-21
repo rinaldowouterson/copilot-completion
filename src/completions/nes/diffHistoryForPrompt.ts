@@ -4,7 +4,7 @@ import { StringEdit } from './stubs/stringEdit';
 import { OffsetRange } from './stubs/offsetRange';
 import { Position } from './stubs/position';
 import { PositionOffsetTransformer } from './stubs/positionToOffsetImpl';
-import { groupAdjacentBy, pushMany } from './stubs/arrays';
+import { groupAdjacentBy, pushMany } from '../../common/arrays';
 import { toUniquePath } from './promptCraftingUtils';
 
 export interface EditDiffHistoryResult {

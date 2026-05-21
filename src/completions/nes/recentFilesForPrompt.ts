@@ -2,7 +2,7 @@ import { DocumentId, PromptOptions, IncludeLineNumbersOption, StatelessNextEditD
 import { LanguageContextResponse, ContextKind } from './stubs/languageContext';
 import { StringText } from './stubs/abstractText';
 import { OffsetRange } from './stubs/offsetRange';
-import { batchArrayElements } from './stubs/arrays';
+import { batchArrayElements } from '../../common/arrays';
 import { illegalArgument } from './stubs/errors';
 import { expandRangeToPageRange } from './promptCrafting';
 import { countTokensForLines, toUniquePath } from './promptCraftingUtils';

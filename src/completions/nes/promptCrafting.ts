@@ -3,9 +3,9 @@ import { AggressivenessLevel, CurrentFileOptions, PromptingStrategy, PromptOptio
 import { StatelessNextEditDocument } from './stubs/types';
 import { IXtabHistoryEntry } from './stubs/types';
 import { ContextKind, TraitContext } from './stubs/languageContext';
-import { Result } from './stubs/result';
-import { range } from './stubs/arrays';
-import { assertNever } from './stubs/assert';
+import { Result } from '../../common/result';
+import { range } from '../../common/arrays';
+import { assertNever } from '../../common/assert';
 import { StringEdit, StringReplacement } from './stubs/stringEdit';
 import { OffsetRange } from './stubs/offsetRange';
 import { getEditDiffHistory } from './diffHistoryForPrompt';

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { TrimNESResponseSuffixOverlap } from '../../completions/nes/suffixOverlapTrim';
+import { TrimNESResponseSuffixOverlap } from '../../common/suffixOverlapTrim';
 
 suite('TrimNESResponseSuffixOverlap', () => {
     test('should detect exact overlap', () => {
