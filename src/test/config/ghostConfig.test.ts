@@ -1,18 +1,55 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import { VSCodeGhostConfigProvider } from '../../config/ghostConfig';
 
-suite('GhostConfigProvider', () => {
-    test('should return default values when no config set', () => {
-        const config = vscode.workspace.getConfiguration('cc-completion.ghost');
-        assert.strictEqual(config.get('enabled'), true);
-        assert.strictEqual(config.get('model'), 'gpt-4o');
-        assert.strictEqual(config.get('promptTemplate'), '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>');
-        assert.strictEqual(config.get('capabilities.limits.max_output_tokens'), 256);
+function mockContext(): vscode.ExtensionContext {
+    const state = new Map<string, unknown>();
+    return {
+        workspaceState: {
+            get: <T>(key: string, defaultValue: T) => (state.has(key) ? state.get(key) : defaultValue) as T,
+            update: (key: string, value: unknown) => { state.set(key, value); return Promise.resolve(); },
+        },
+        subscriptions: [] as vscode.Disposable[],
+    } as unknown as vscode.ExtensionContext;
+}
+
+suite('VSCodeGhostConfigProvider', () => {
+
+    test('returns default model when no config set', () => {
+        const provider = new VSCodeGhostConfigProvider(mockContext());
+        assert.strictEqual(provider.model, 'gpt-4o');
     });
 
-    test('should return empty strings for baseUrl and apiKey by default', () => {
+    test('returns updated value after config change invalidates cache', async () => {
+        const provider = new VSCodeGhostConfigProvider(mockContext());
         const config = vscode.workspace.getConfiguration('cc-completion.ghost');
-        assert.strictEqual(config.get('baseUrl'), '');
-        assert.strictEqual(config.get('apiKey'), '');
+
+        assert.strictEqual(provider.model, 'gpt-4o');
+
+        await config.update('model', 'gpt-4.1', vscode.ConfigurationTarget.Global);
+        assert.strictEqual(provider.model, 'gpt-4.1');
+
+        await config.update('model', undefined, vscode.ConfigurationTarget.Global);
+    });
+
+    test('returns default promptTemplate when no config set', () => {
+        const provider = new VSCodeGhostConfigProvider(mockContext());
+        assert.strictEqual(
+            provider.promptTemplate,
+            '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>',
+        );
+    });
+
+    test('enabled is independent of settings.json cache', () => {
+        const provider = new VSCodeGhostConfigProvider(mockContext());
+
+        const initialEnabled = provider.enabled;
+        provider.enabled = false;
+        assert.strictEqual(provider.enabled, false);
+
+        // model still works (separate storage)
+        assert.strictEqual(provider.model, 'gpt-4o');
+
+        provider.enabled = initialEnabled;
     });
 });
