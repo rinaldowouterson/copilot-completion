@@ -2,6 +2,7 @@ export const ConfigKeys = {
     Ghost: {
         enabled: 'cc-completion.ghost.enabled',
         baseUrl: 'cc-completion.ghost.baseUrl',
+        stops: 'cc-completion.ghost.stops',
         apiKey: 'cc-completion.ghost.apiKey',
         model: 'cc-completion.ghost.model',
         promptTemplate: 'cc-completion.ghost.promptTemplate',
@@ -19,6 +20,8 @@ export const ConfigKeys = {
         baseUrl: 'cc-completion.nes.baseUrl',
         apiKey: 'cc-completion.nes.apiKey',
         model: 'cc-completion.nes.model',
+        think: 'cc-completion.nes.think',
+        family: 'cc-completion.nes.family',
         supportedEndpoint: 'cc-completion.nes.supportedEndpoint',
         maxOutputTokens: 'cc-completion.nes.capabilities.limits.max_output_tokens',
         maxContextWindowTokens: 'cc-completion.nes.capabilities.limits.max_context_window_tokens',
