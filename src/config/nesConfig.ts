@@ -24,6 +24,8 @@ export interface INesConfigProvider {
     get baseUrl(): string;
     get apiKey(): string;
     get model(): string;
+    get think(): boolean;
+    get family(): string;
     get supportedEndpoint(): NesSupportedEndpoint;
     get capabilities(): NesCapabilities;
     get maxOutputTokens(): number;
@@ -76,6 +78,14 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
             this._context.workspaceState.update(this._ncpKey, false);
         }
         this._onDidChangeEnabled.fire();
+    }
+
+    get think(): boolean {
+        return this._cached<boolean>(ConfigKeys.Nes.think, false);
+    }
+
+    get family(): string {
+        return this._cached<string>(ConfigKeys.Nes.family, 'standard');
     }
 
     get nextCursorPredictionEnabled(): boolean {
