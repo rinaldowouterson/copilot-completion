@@ -2,7 +2,7 @@
   "name": "copilot-completions",
   "displayName": "Copilot Completions",
   "description": "Code completion powered by LLM — GHOST (FIM) and NES (Next Edit Suggestion)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "engines": {
     "vscode": "^1.110.0"
   },
@@ -170,23 +170,19 @@
           "description": "Whether the model supports thinking"
         },
         "cc-completion.nes.capabilities.supports.reasoning_effort": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "minimal",
-              "low",
-              "medium",
-              "high",
-              "xhigh"
-            ]
-          },
-          "default": [],
+          "type": "string",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
           "description": "Supported reasoning effort levels"
         },
         "cc-completion.nes.suffixOverlapThreshold": {
           "type": "number",
-          "default": 0.85,
+          "default": 0.9,
           "description": "Suffix overlap similarity threshold for NES response trimming"
         },
         "cc-completion.nes.suffixOverlapType": {

@@ -3,32 +3,24 @@ import { ILLMAdapter } from './llmAdapter';
 import { LLMRequest, LLMResponse, LLMError, Capabilities, normalizeBody } from './llmRequest';
 import { readSSEStream } from './sseStream';
 
-export class OpenAIChatAdapter implements ILLMAdapter {
-    constructor(
-        private readonly baseUrl: string,
-        private readonly apiKey: string,
-        private readonly model: string,
-        private readonly family: string = 'standard',
-        private readonly _defaultPresencePenalty: number = 1,
-        private readonly _defaultFrequencyPenalty: number = 0.2,
-        private readonly _defaultStream: boolean = true,
-    ) {}
+export class OpenAIChatCompletionAdapter implements ILLMAdapter {
 
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
-        const url = `${this.baseUrl}/chat/completions`;
+        const url = `${request.baseUrl}/chat/completions`;
         const bodyObj: Record<string, unknown> = {
-            model: this.model,
+            model: request.model,
             messages: request.messages || [],
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            presence_penalty: request.presence_penalty ?? this._defaultPresencePenalty,
-            frequency_penalty: request.frequency_penalty ?? this._defaultFrequencyPenalty,
-            stream: request.stream ?? this._defaultStream,
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.frequency_penalty,
+            stream: request.stream,
             stop: request.stop,
             top_p: request.top_p,
+            n: request.n,
         };
 
-        applyThinkingParams(bodyObj, this.family, request.capabilities);
+        applyThinkingParams(bodyObj, request.capabilities,request.family);
 
         const body = JSON.stringify(bodyObj);
 
@@ -37,7 +29,7 @@ export class OpenAIChatAdapter implements ILLMAdapter {
             signal,
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
+                'Authorization': `Bearer ${request.apiKey}`,
             },
             body: normalizeBody(body),
         });
@@ -74,35 +66,34 @@ export class OpenAIChatAdapter implements ILLMAdapter {
 
 function applyThinkingParams(
     body: Record<string, unknown>,
-    family: string,
-    capabilities: Capabilities | undefined,
+    capabilities?: Capabilities,
+    family?: string,
 ): void {
-    if (!capabilities?.thinking && family !== 'deepseek' && family !== 'qwen') {
-        return;
+    if(family === undefined) return;
+
+    if (capabilities?.thinking) {
+        switch (family) {
+            case 'deepseek':
+                body.enable_thinking = capabilities?.thinking === true;
+                break;
+            case 'qwen':
+                body.enable_thinking = capabilities?.thinking === true;
+                break;
+        }
     }
 
-    const effort = (capabilities?.reasoning_effort as string) || 'medium';
-
-    switch (family) {
-        case 'openai-o':
-            body.reasoning_effort = effort;
-            delete body.temperature;
-            break;
-        case 'openai-gpt5':
-            body.reasoning = { effort };
-            break;
-        case 'deepseek':
-            body.enable_thinking = capabilities?.thinking === true;
-            break;
-        case 'qwen':
-            body.enable_thinking = capabilities?.thinking === true;
-            break;
-        case 'standard':
-            break;
-        default:
-            console.warn(`[OpenAIChatAdapter] Unknown thinking family: "${family}", falling back to standard`);
-            break;
+    if(capabilities?.reasoning_effort){
+        const effort = (capabilities?.reasoning_effort as string) || 'medium'; 
+        switch (family) {
+            case 'openai-o':
+                body.reasoning_effort = effort;
+                break;
+            case 'openai-gpt5':
+                body.reasoning = { effort };
+                break;
+        }
     }
+
 }
 
 export { applyThinkingParams };

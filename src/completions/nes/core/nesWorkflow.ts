@@ -113,15 +113,24 @@ export class NesWorkflow {
         try {
             const response = await adapter.send(
                 {
+                    baseUrl: this._config.baseUrl,
+                    apiKey: this._config.apiKey,
+                    model: this._config.model,
+                    family: this._config.family,
                     messages: [
                         { role: 'system', content: promptAssembly.systemPrompt },
                         { role: 'user', content: promptAssembly.userPrompt },
                     ],
                     max_tokens: this._config.maxOutputTokens,
                     temperature: 0,
+                    top_p: 1,
+                    n: 1,
+                    stream: this._config.stream,
+                    presence_penalty: this._config.presencePenalty,
+                    frequency_penalty: this._config.frequencyPenalty,
                     capabilities: {
                         thinking: this._config.capabilities.supports.thinking,
-                        reasoning_effort: this._config.capabilities.supports.reasoning_effort[0],
+                        reasoning_effort: this._config.capabilities.supports.reasoning_effort,
                     },
                 },
                 abortController.signal,

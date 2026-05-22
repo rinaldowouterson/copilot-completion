@@ -9,7 +9,7 @@ import { INesConfigProvider, VSCodeNesConfigProvider } from './config/nesConfig'
 // Shared
 import { ILogService, LogService } from './completions/shared/log/logService';
 import { ILLMAdapterManager, LLMAdapterManager } from './completions/shared/llm/llmAdapter';
-import { OpenAIChatAdapter } from './completions/shared/llm/openaiChatAdapter';
+import { OpenAIChatCompletionAdapter } from './completions/shared/llm/openaiChatCompletionAdapter';
 import { OpenAIResponseAdapter } from './completions/shared/llm/openaiResponseAdapter';
 import { AnthropicAdapter } from './completions/shared/llm/anthropicAdapter';
 import { OpenAICompletionAdapter } from './completions/shared/llm/openaiCompletionAdapter';
@@ -84,20 +84,6 @@ export function activate(context: vscode.ExtensionContext) {
         statusBar.register(),
     );
 
-    // Re-register adapters on config change
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('cc-completion.ghost.baseUrl') ||
-                e.affectsConfiguration('cc-completion.ghost.apiKey') ||
-                e.affectsConfiguration('cc-completion.nes.baseUrl') ||
-                e.affectsConfiguration('cc-completion.nes.apiKey') ||
-                e.affectsConfiguration('cc-completion.nes.supportedEndpoint') ||
-                e.affectsConfiguration('cc-completion.nes.family')) {
-                registerLLMAdapters(instantiationService, ghostConfig, nesConfig, logService);
-            }
-        }),
-    );
-
     logService.info('CC Completion activated');
 }
 
@@ -112,15 +98,7 @@ function registerLLMAdapters(
     );
 
     // GHOST: always completions
-    llmManager.register('completions', new OpenAICompletionAdapter(
-        ghostConfig.baseUrl,
-        ghostConfig.apiKey,
-        ghostConfig.model,
-        log,
-        ghostConfig.presencePenalty,
-        ghostConfig.frequencyPenalty,
-        ghostConfig.stream,
-    ));
+    llmManager.register('completions', new OpenAICompletionAdapter(log));
     log.debug('Registered GHOST adapter: completions');
 
     // NES: based on supportedEndpoint config
@@ -129,12 +107,7 @@ function registerLLMAdapters(
 
     switch (endpoint) {
         case 'chat/completions':
-            llmManager.register('chat/completions', new OpenAIChatAdapter(
-                baseUrl, apiKey, model, nesConfig.family,
-                nesConfig.presencePenalty,
-                nesConfig.frequencyPenalty,
-                nesConfig.stream,
-            ));
+            llmManager.register('chat/completions', new OpenAIChatCompletionAdapter());
             break;
         // TODO - support other endpoints like 'responses' and 'messages' once we have a use case for them
         // case 'responses':

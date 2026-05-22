@@ -14,6 +14,10 @@ export interface Capabilities {
 }
 
 export interface LLMRequest {
+    model: string;
+    baseUrl: string;
+    apiKey: string; 
+    family?: string;
     messages?: ChatMessage[];
     prompt?: string;
     max_tokens: number;

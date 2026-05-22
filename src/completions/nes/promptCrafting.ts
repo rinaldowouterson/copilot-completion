@@ -69,12 +69,10 @@ ${PromptTags.CURRENT_FILE.start}
 current_file_path: ${currentFilePath}
 ${currentFileContent}
 ${PromptTags.CURRENT_FILE.end}
-${lintsWithNewLinePadding}
-${PromptTags.EDIT_HISTORY.start}
-Edit history from top to bottom: 
-- the higher up, the older
-- the further down, the newer
 
+${lintsWithNewLinePadding}
+
+${PromptTags.EDIT_HISTORY.start}
 ${editDiffHistory}
 ${PromptTags.EDIT_HISTORY.end}`;
 
@@ -356,7 +354,8 @@ export function constructTaggedFile(
 			areaAroundCodeToEdit: IncludeLineNumbersOption;
 			currentFileContent: IncludeLineNumbersOption;
 		};
-	}
+	},
+	predict: boolean = false
 ) {
 	// Content with cursor tag - always created for areaAroundCodeToEdit
 	const contentWithCursorAsLinesOriginal = (() => {
@@ -369,21 +368,34 @@ export function constructTaggedFile(
 
 	const editWindowWithCursorAsLines = contentWithCursorAsLines.slice(editWindowLinesRange.start, editWindowLinesRange.endExclusive);
 
-	const areaAroundCodeToEdit = [
-		PromptTags.AREA_AROUND.start,
-		PromptTags.AREA_CODE_PREFIX.start,
-		...contentWithCursorAsLines.slice(areaAroundEditWindowLinesRange.start, editWindowLinesRange.start),
-		PromptTags.AREA_CODE_PREFIX.end,
-		PromptTags.EDIT_WINDOW.start,
-		"###remain edit start boundary line###",
-		...editWindowWithCursorAsLines,
-		"###remain edit end boundary line###",
-		PromptTags.EDIT_WINDOW.end,
-		PromptTags.AREA_CODE_SUFFIX.start,
-		...contentWithCursorAsLines.slice(editWindowLinesRange.endExclusive, areaAroundEditWindowLinesRange.endExclusive),
-		PromptTags.AREA_CODE_SUFFIX.end,
-		PromptTags.AREA_AROUND.end
-	];
+	let areaAroundCodeToEdit:string[] = []
+	if(predict) {
+		areaAroundCodeToEdit = [
+			PromptTags.AREA_AROUND.start,
+			...contentWithCursorAsLines.slice(areaAroundEditWindowLinesRange.start, editWindowLinesRange.start),
+			PromptTags.EDIT_WINDOW.start,
+			...editWindowWithCursorAsLines,
+			PromptTags.EDIT_WINDOW.end,
+			...contentWithCursorAsLines.slice(editWindowLinesRange.endExclusive, areaAroundEditWindowLinesRange.endExclusive),
+			PromptTags.AREA_AROUND.end
+		];
+	} else {
+		areaAroundCodeToEdit = [
+			PromptTags.AREA_AROUND.start,
+			PromptTags.AREA_CODE_PREFIX.start,
+			...contentWithCursorAsLines.slice(areaAroundEditWindowLinesRange.start, editWindowLinesRange.start),
+			PromptTags.AREA_CODE_PREFIX.end,
+			PromptTags.EDIT_WINDOW.start,
+			"###remain edit start boundary line###",
+			...editWindowWithCursorAsLines,
+			"###remain edit end boundary line###",
+			PromptTags.EDIT_WINDOW.end,
+			PromptTags.AREA_CODE_SUFFIX.start,
+			...contentWithCursorAsLines.slice(editWindowLinesRange.endExclusive, areaAroundEditWindowLinesRange.endExclusive),
+			PromptTags.AREA_CODE_SUFFIX.end,
+			PromptTags.AREA_AROUND.end
+		];
+	}
 
 	// For current file content, optionally include cursor tag based on includeCursorTag option
 	const currentFileContentSourceLines = promptOptions.currentFile.includeCursorTag

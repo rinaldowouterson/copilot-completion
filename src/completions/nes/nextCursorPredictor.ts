@@ -54,6 +54,7 @@ export class NextCursorPredictor {
                     currentFileContent: IncludeLineNumbersOption.WithSpaceAfter,
                 },
             },
+            true
         );
 
         if (taggedR.isError()) {
@@ -102,10 +103,14 @@ export class NextCursorPredictor {
 
             const response = await adapter.send(
                 {
+                    baseUrl: this._config.baseUrl,
+                    apiKey: this._config.apiKey,
+                    model: this._config.model,
+                    family: this._config.family,
                     messages: [
                         { 
                             role: 'system', 
-                            content:  'Your task is to predict the line number where the developer is most likely to make their next edit. **just output the line number**.'
+                            content:  'Your task is to predict the line number where the developer is most likely to make their next edit. If you jump in the current file, just output the line number. If you don\'t think anywhere is a good next line jump target, just output the current line number of the cursor. Make sure to output no explanation, reasoning, extra spaces, etc.'
                         },
                         { role: 'user', content: userMessage + '\n\n **just output the line int number where the developer will make their next edit.**' },
                     ],

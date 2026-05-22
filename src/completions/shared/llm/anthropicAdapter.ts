@@ -3,15 +3,9 @@ import { LLMRequest, LLMResponse, LLMError, normalizeBody } from './llmRequest';
 import { readSSEStream } from './sseStream';
 
 export class AnthropicAdapter implements ILLMAdapter {
-    constructor(
-        private readonly baseUrl: string,
-        private readonly apiKey: string,
-        private readonly model: string,
-        private readonly _defaultStream: boolean = true,
-    ) {}
 
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
-        const url = `${this.baseUrl}/messages`;
+        const url = `${request.baseUrl}/messages`;
         const messages = request.messages || [];
         let system: string | undefined;
         const userMessages = messages.filter(m => {
@@ -20,11 +14,11 @@ export class AnthropicAdapter implements ILLMAdapter {
         });
 
         const bodyObj: Record<string, unknown> = {
-            model: this.model,
+            model: request.model,
             messages: userMessages,
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            stream: request.stream ?? this._defaultStream,
+            stream: request.stream
         };
         if (system) bodyObj.system = system;
         if (request.stop) bodyObj.stop_sequences = request.stop;
@@ -34,7 +28,7 @@ export class AnthropicAdapter implements ILLMAdapter {
             signal,
             headers: {
                 'Content-Type': 'application/json',
-                'x-api-key': this.apiKey,
+                'x-api-key': request.apiKey,
                 'anthropic-version': '2023-06-01',
             },
             body: normalizeBody(JSON.stringify(bodyObj)),

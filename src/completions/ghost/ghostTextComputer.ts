@@ -177,12 +177,18 @@ export class GhostTextComputer {
         try {
             const response = await adapter.send(
                 {
+                    baseUrl: this._config.baseUrl,
+                    apiKey: this._config.apiKey,
+                    model: this._config.model,
                     prompt,
                     max_tokens: effectiveTokens,
                     temperature: 0,
-                    stop: requestMultiline ? ['\n\n',"\n```"] : ['\n'],
+                    stop: (requestMultiline ? ['\n\n',"\n```"] : ['\n']).concat(this._config.stops),
                     top_p:1,
-                    n:1
+                    n:1,
+                    stream: this._config.stream,
+                    presence_penalty: this._config.presencePenalty,
+                    frequency_penalty: this._config.frequencyPenalty,
                 },
                 abortController.signal,
             );

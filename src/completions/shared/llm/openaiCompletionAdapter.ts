@@ -5,38 +5,32 @@ import { ILogService } from '../log/logService';
 
 export class OpenAICompletionAdapter implements ILLMAdapter {
     constructor(
-        private readonly baseUrl: string,
-        private readonly apiKey: string,
-        private readonly model: string,
         private readonly logService: ILogService,
-        private readonly _defaultPresencePenalty: number = 1,
-        private readonly _defaultFrequencyPenalty: number = 0.2,
-        private readonly _defaultStream: boolean = true,
     ) {}
 
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
-        this.logService.debug(`[OpenAI] Sending request | model=${this.model} | maxTokens=${request.max_tokens} | temperature=${request.temperature}`);
+        this.logService.debug(`[OpenAI] Sending request | model=${request.model} | maxTokens=${request.max_tokens} | temperature=${request.temperature}`);
 
-        const url = `${this.baseUrl}/completions`;
+        const url = `${request.baseUrl}/completions`;
         const body = JSON.stringify({
-            model: this.model,
+            model: request.model,
             prompt: request.prompt || '',
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             top_p: request.top_p,
             n: request.n,
-            presence_penalty: request.presence_penalty ?? this._defaultPresencePenalty,
-            frequency_penalty: request.frequency_penalty ?? this._defaultFrequencyPenalty,
-            stream: request.stream ?? this._defaultStream,
-            ...(request.stop ? { stop: request.stop } : {}),
+            presence_penalty: request.presence_penalty,
+            frequency_penalty: request.frequency_penalty,
+            stream: request.stream,
+            stop: request.stop
         });
 
-        const response = await fetch(url, {
+        const response =  await fetch(url, {
             method: 'POST',
             signal,
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
+                'Authorization': `Bearer ${request.apiKey}`,
             },
             body: normalizeBody(body),
         });

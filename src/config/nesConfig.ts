@@ -11,7 +11,7 @@ export interface NesCapabilities {
     };
     supports: {
         thinking: boolean;
-        reasoning_effort: string[];
+        reasoning_effort: string;
     };
 }
 
@@ -24,7 +24,6 @@ export interface INesConfigProvider {
     get baseUrl(): string;
     get apiKey(): string;
     get model(): string;
-    get think(): boolean;
     get family(): string;
     get supportedEndpoint(): NesSupportedEndpoint;
     get capabilities(): NesCapabilities;
@@ -80,10 +79,6 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
         this._onDidChangeEnabled.fire();
     }
 
-    get think(): boolean {
-        return this._cached<boolean>(ConfigKeys.Nes.think, false);
-    }
-
     get family(): string {
         return this._cached<string>(ConfigKeys.Nes.family, 'standard');
     }
@@ -121,14 +116,11 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
         const value: NesCapabilities = {
             limits: {
                 max_output_tokens: this.maxOutputTokens,
-                max_context_window_tokens: vscode.workspace.getConfiguration()
-                    .get<number>(ConfigKeys.Nes.maxContextWindowTokens, 128000),
+                max_context_window_tokens: this._cached<number>(ConfigKeys.Nes.maxContextWindowTokens, 128000),
             },
             supports: {
-                thinking: vscode.workspace.getConfiguration()
-                    .get<boolean>(ConfigKeys.Nes.thinking, false),
-                reasoning_effort: vscode.workspace.getConfiguration()
-                    .get<string[]>(ConfigKeys.Nes.reasoningEffort, []),
+                thinking: this._cached<boolean>(ConfigKeys.Nes.thinking, false),
+                reasoning_effort: this._cached<string>(ConfigKeys.Nes.reasoningEffort, 'medium'),
             },
         };
         this._cache.set(key, value);
@@ -140,7 +132,7 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     }
 
     get suffixOverlapThreshold(): number {
-        return this._cached<number>(ConfigKeys.Nes.suffixOverlapThreshold, 0.85);
+        return this._cached<number>(ConfigKeys.Nes.suffixOverlapThreshold, 0.9);
     }
 
     get suffixOverlapType(): 'low' | 'high' {

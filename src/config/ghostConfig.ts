@@ -18,6 +18,7 @@ export interface IGhostConfigProvider {
     get baseUrl(): string;
     get apiKey(): string;
     get model(): string;
+    get stops(): string[];
     get promptTemplate(): string;
     get capabilities(): GhostCapabilities;
     get maxOutputTokens(): number;
@@ -81,6 +82,10 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
         return this._cached<string>(ConfigKeys.Ghost.model, 'gpt-4o');
     }
 
+    get stops(): string[] {
+        return this._cached<string[]>(ConfigKeys.Ghost.stops, []);
+    }
+
     get promptTemplate(): string {
         return this._cached<string>(
             ConfigKeys.Ghost.promptTemplate,
@@ -96,8 +101,7 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
         const value: GhostCapabilities = {
             limits: {
                 max_output_tokens: this.maxOutputTokens,
-                max_context_window_tokens: vscode.workspace.getConfiguration()
-                    .get<number>(ConfigKeys.Ghost.maxContextWindowTokens, 128000),
+                max_context_window_tokens: this._cached<number>(ConfigKeys.Ghost.maxContextWindowTokens, 128000),
             },
         };
         this._cache.set(key, value);

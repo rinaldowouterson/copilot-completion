@@ -31,7 +31,7 @@ export namespace PromptTags {
 
     export const RECENT_FILE = createTag('recently_viewed_code_snippet');
 
-    export const DIAGNOSTICS_EXCEPTION = createTag('diagnostics_exception');
+    export const LINTER = createTag('linter');
 
     export function createLintTag(tagName: string): Tag {
         return createTag(tagName);

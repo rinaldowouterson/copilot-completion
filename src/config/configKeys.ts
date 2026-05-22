@@ -20,7 +20,6 @@ export const ConfigKeys = {
         baseUrl: 'cc-completion.nes.baseUrl',
         apiKey: 'cc-completion.nes.apiKey',
         model: 'cc-completion.nes.model',
-        think: 'cc-completion.nes.think',
         family: 'cc-completion.nes.family',
         supportedEndpoint: 'cc-completion.nes.supportedEndpoint',
         maxOutputTokens: 'cc-completion.nes.capabilities.limits.max_output_tokens',

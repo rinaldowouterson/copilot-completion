@@ -31,12 +31,12 @@
 
 | 适配器 | API 端点 | 适用场景 |
 |---|---|---|
-| `OpenAIChatAdapter` | `/chat/completions` | 通用 NES + GHOST |
+| `OpenAIChatAdapter` | `/chat/completions` | NES |
 | `OpenAICompletionAdapter` | `/completions` | 原生 FIM (GHOST) |
 
 
 > [!tip]
-> `GHOST` 可使用 `qwen2.5 coder`，可本地部署且有不错质量
+> `GHOST` 可使用 `Qwen2.5 coder`，可本地部署且质量不错
 
 ## 配置项
 
@@ -46,11 +46,14 @@
 
 | 键 | 类型 | 默认值 | 描述 |
 |---|---|---|---|
-| `ghost.enabled` | `boolean` | `true` | 启用 GHOST 内联补全 |
 | `ghost.baseUrl` | `string` | `""` | API 基础 URL |
 | `ghost.apiKey` | `string` | `""` | API 密钥 |
 | `ghost.model` | `string` | `"gpt-4o"` | 模型名称 |
+| `ghost.stops` | `string[]` | `[]` | 响应生成的停止序列 |
 | `ghost.promptTemplate` | `string` | `<\|fim_prefix\|>{prefix}<\|fim_suffix\|>{suffix}<\|fim_middle\|>` | FIM 提示模板 |
+| `ghost.capabilities.limits.max_output_tokens` | `number` | `512` | 最大输出 token 数（硬上限） |
+| `ghost.capabilities.limits.max_context_window_tokens` | `number` | `128000` | 最大上下文窗口 token 数 |
+| `ghost.capabilities.limits.delay` | `number` | `150` | 网络请求最小间隔（毫秒） |
 | `ghost.suffixOverlapThreshold` | `number` | `0.6` | 后缀重叠相似度阈值 |
 | `ghost.suffixOverlapType` | `"low"` \| `"high"` | `"low"` | 重叠检测模式 |
 | `ghost.presencePenalty` | `number` | `1` | 存在惩罚 (-2 到 2) |
@@ -61,18 +64,20 @@
 
 | 键 | 类型 | 默认值 | 描述 |
 |---|---|---|---|
-| `nes.enabled` | `boolean` | `true` | 启用下一步编辑建议 |
 | `nes.baseUrl` | `string` | `""` | API 基础 URL |
 | `nes.apiKey` | `string` | `""` | API 密钥 |
 | `nes.model` | `string` | `"gpt-4o"` | 模型名称 |
 | `nes.supportedEndpoint` | `"chat/completions"` | `"chat/completions"` | LLM API 端点 |
-| `nes.suffixOverlapThreshold` | `number` | `0.85` | 后缀重叠相似度阈值 |
+| `nes.family` | `"standard"` \| `"openai-o"` \| `"openai-gpt5"` \| `"deepseek"` \| `"qwen"` | `"standard"` | NES 思维模式对应的模型家族 |
+| `nes.capabilities.limits.max_output_tokens` | `number` | `8192` | 最大输出 token 数（硬上限） |
+| `nes.capabilities.limits.max_context_window_tokens` | `number` | `128000` | 最大上下文窗口 token 数 |
+| `nes.capabilities.supports.thinking` | `boolean` | `false` | 模型支持思考/推理 |
+| `nes.capabilities.supports.reasoning_effort` | `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | — | 支持的推理强度级别 |
+| `nes.suffixOverlapThreshold` | `number` | `0.9` | 后缀重叠相似度阈值 |
 | `nes.suffixOverlapType` | `"low"` \| `"high"` | `"high"` | 重叠检测模式 |
 | `nes.presencePenalty` | `number` | `1` | 存在惩罚 (-2 到 2) |
 | `nes.frequencyPenalty` | `number` | `0.2` | 频率惩罚 (-2 到 2) |
 | `nes.stream` | `boolean` | `true` | 启用 SSE 流式传输 |
-| `nes.capabilities.supports.thinking` | `boolean` | `false` | 模型支持思考/推理 |
-| `nes.capabilities.supports.reasoning_effort` | `string[]` | `[]` | 支持的推理强度级别 |
 
 ## 命令
 

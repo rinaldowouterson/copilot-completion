@@ -18,7 +18,7 @@ export class LintErrors {
         }
 
         const formatted = diagnostics.map(d => formatSingleDiagnostic(d, this._document.lines, options)).join('\n');
-        return `${PromptTags.DIAGNOSTICS_EXCEPTION.start}\n${formatted}\n${PromptTags.DIAGNOSTICS_EXCEPTION.end}`;
+        return `${PromptTags.LINTER.start}\n${formatted}\n${PromptTags.LINTER.end}`;
     }
 
     getData(): string {

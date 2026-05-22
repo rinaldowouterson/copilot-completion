@@ -32,11 +32,11 @@ Code completion VS Code extension powered by LLMs — supporting both **GHOST** 
 
 | Adapter | API Endpoint | Best For |
 |---|---|---|
-| `OpenAIChatAdapter` | `/chat/completions` | General-purpose NES + GHOST |
+| `OpenAIChatAdapter` | `/chat/completions` | NES |
 | `OpenAICompletionAdapter` | `/completions` | Native FIM (GHOST) |
 
 > [!tip]
-> `qwen2.5 coder` is better for `GHOST`, which can run in local and provide better suggestion.
+> `Qwen2.5 coder` is good for `GHOST`, which can run in local and provide better suggestion.
 
 ## Configuration
 
@@ -49,7 +49,11 @@ All settings are under the `cc-completion` prefix.
 | `ghost.baseUrl` | `string` | `""` | API base URL |
 | `ghost.apiKey` | `string` | `""` | API key |
 | `ghost.model` | `string` | `"gpt-4o"` | Model name |
+| `ghost.stops` | `string[]` | `[]` | Stop sequences for response generation |
 | `ghost.promptTemplate` | `string` | `<\|fim_prefix\|>{prefix}<\|fim_suffix\|>{suffix}<\|fim_middle\|>` | FIM prompt template |
+| `ghost.capabilities.limits.max_output_tokens` | `number` | `512` | Max output tokens (hard cap) |
+| `ghost.capabilities.limits.max_context_window_tokens` | `number` | `128000` | Max context window tokens |
+| `ghost.capabilities.limits.delay` | `number` | `150` | Minimum delay (ms) between network requests |
 | `ghost.suffixOverlapThreshold` | `number` | `0.6` | Suffix overlap similarity threshold |
 | `ghost.suffixOverlapType` | `"low"` \| `"high"` | `"low"` | Overlap detection mode |
 | `ghost.presencePenalty` | `number` | `1` | Presence penalty (-2 to 2) |
@@ -63,14 +67,17 @@ All settings are under the `cc-completion` prefix.
 | `nes.baseUrl` | `string` | `""` | API base URL |
 | `nes.apiKey` | `string` | `""` | API key |
 | `nes.model` | `string` | `"gpt-4o"` | Model name |
-| `nes.supportedEndpoint` |  `"chat/completions"` | `"chat/completions"` | LLM API endpoint |
-| `nes.suffixOverlapThreshold` | `number` | `0.85` | Suffix overlap similarity threshold |
+| `nes.supportedEndpoint` | `"chat/completions"` | `"chat/completions"` | LLM API endpoint |
+| `nes.family` | `"standard"` \| `"openai-o"` \| `"openai-gpt5"` \| `"deepseek"` \| `"qwen"` | `"standard"` | Model family for NES thinking mode |
+| `nes.capabilities.limits.max_output_tokens` | `number` | `8192` | Max output tokens (hard cap) |
+| `nes.capabilities.limits.max_context_window_tokens` | `number` | `128000` | Max context window tokens |
+| `nes.capabilities.supports.thinking` | `boolean` | `false` | Model supports thinking/reasoning |
+| `nes.capabilities.supports.reasoning_effort` | `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | — | Supported reasoning effort level |
+| `nes.suffixOverlapThreshold` | `number` | `0.9` | Suffix overlap similarity threshold |
 | `nes.suffixOverlapType` | `"low"` \| `"high"` | `"high"` | Overlap detection mode |
 | `nes.presencePenalty` | `number` | `1` | Presence penalty (-2 to 2) |
 | `nes.frequencyPenalty` | `number` | `0.2` | Frequency penalty (-2 to 2) |
 | `nes.stream` | `boolean` | `true` | Enable SSE streaming |
-| `nes.capabilities.supports.thinking` | `boolean` | `false` | Model supports thinking/reasoning |
-| `nes.capabilities.supports.reasoning_effort` | `string[]` | `[]` | Supported reasoning levels |
 
 ## Commands
 
