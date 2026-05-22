@@ -121,6 +121,7 @@ export class NesWorkflow {
                     temperature: 0,
                     capabilities: {
                         thinking: this._config.capabilities.supports.thinking,
+                        reasoning_effort: this._config.capabilities.supports.reasoning_effort[0],
                     },
                 },
                 abortController.signal,
