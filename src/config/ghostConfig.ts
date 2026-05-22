@@ -35,8 +35,28 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
 
     private readonly _onDidChangeEnabled = new vscode.EventEmitter<void>();
     private readonly _stateKey = 'ghost.enabled';
+    private readonly _cache = new Map<string, unknown>();
 
-    constructor(private readonly _context: vscode.ExtensionContext) {}
+    constructor(private readonly _context: vscode.ExtensionContext) {
+        _context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration(e => {
+                if (e.affectsConfiguration('cc-completion.ghost')) {
+                    this._cache.clear();
+                }
+            }),
+        );
+    }
+
+    private _cached<T>(key: string, defaultValue: T): T {
+        if (this._cache.has(key)) {
+            return this._cache.get(key) as T;
+        }
+        const value = vscode.workspace.getConfiguration().get<T>(key, defaultValue);
+        this._cache.set(key, value);
+        return value;
+    }
+
+    // --- workspaceState (no cache) ---
 
     get enabled(): boolean {
         return this._context.workspaceState.get<boolean>(this._stateKey, true);
@@ -47,68 +67,69 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
         this._onDidChangeEnabled.fire();
     }
 
+    // --- settings.json (cached) ---
+
     get baseUrl(): string {
-        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.baseUrl, '');
+        return this._cached<string>(ConfigKeys.Ghost.baseUrl, '');
     }
 
     get apiKey(): string {
-        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.apiKey, '');
+        return this._cached<string>(ConfigKeys.Ghost.apiKey, '');
     }
 
     get model(): string {
-        return vscode.workspace.getConfiguration().get<string>(ConfigKeys.Ghost.model, 'gpt-4o');
+        return this._cached<string>(ConfigKeys.Ghost.model, 'gpt-4o');
     }
 
     get promptTemplate(): string {
-        return vscode.workspace.getConfiguration().get<string>(
+        return this._cached<string>(
             ConfigKeys.Ghost.promptTemplate,
-            '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>'
+            '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>',
         );
     }
 
     get capabilities(): GhostCapabilities {
-        return {
+        const key = 'ghost.capabilities';
+        if (this._cache.has(key)) {
+            return this._cache.get(key) as GhostCapabilities;
+        }
+        const value: GhostCapabilities = {
             limits: {
                 max_output_tokens: this.maxOutputTokens,
                 max_context_window_tokens: vscode.workspace.getConfiguration()
                     .get<number>(ConfigKeys.Ghost.maxContextWindowTokens, 128000),
-            }
+            },
         };
+        this._cache.set(key, value);
+        return value;
     }
 
     get maxOutputTokens(): number {
-        return vscode.workspace.getConfiguration()
-            .get<number>(ConfigKeys.Ghost.maxOutputTokens, 512);
+        return this._cached<number>(ConfigKeys.Ghost.maxOutputTokens, 512);
     }
 
     get delay(): number {
-        return vscode.workspace.getConfiguration()
-            .get<number>(ConfigKeys.Ghost.delay, 150);
+        return this._cached<number>(ConfigKeys.Ghost.delay, 150);
     }
 
     get suffixOverlapThreshold(): number {
-        return vscode.workspace.getConfiguration()
-            .get<number>(ConfigKeys.Ghost.suffixOverlapThreshold, 0.6);
+        return this._cached<number>(ConfigKeys.Ghost.suffixOverlapThreshold, 0.6);
     }
 
     get suffixOverlapType(): 'low' | 'high' {
-        return vscode.workspace.getConfiguration()
-            .get<'low' | 'high'>(ConfigKeys.Ghost.suffixOverlapType, 'low');
+        return this._cached<'low' | 'high'>(ConfigKeys.Ghost.suffixOverlapType, 'low');
     }
 
     get presencePenalty(): number {
-        return vscode.workspace.getConfiguration()
-            .get<number>(ConfigKeys.Ghost.presencePenalty, 1);
+        return this._cached<number>(ConfigKeys.Ghost.presencePenalty, 1);
     }
 
     get frequencyPenalty(): number {
-        return vscode.workspace.getConfiguration()
-            .get<number>(ConfigKeys.Ghost.frequencyPenalty, 0.2);
+        return this._cached<number>(ConfigKeys.Ghost.frequencyPenalty, 0.2);
     }
 
     get stream(): boolean {
-        return vscode.workspace.getConfiguration()
-            .get<boolean>(ConfigKeys.Ghost.stream, true);
+        return this._cached<boolean>(ConfigKeys.Ghost.stream, true);
     }
 
     onDidChangeEnabled(listener: () => void): vscode.Disposable {
