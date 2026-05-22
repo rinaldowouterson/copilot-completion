@@ -1,13 +1,13 @@
 {
-  "name": "copilot-completion",
-  "displayName": "Copilot Completion",
+  "name": "copilot-completions",
+  "displayName": "Copilot Completions",
   "description": "Code completion powered by LLM — GHOST (FIM) and NES (Next Edit Suggestion)",
   "version": "1.0.0",
   "engines": {
     "vscode": "^1.110.0"
   },
 	"buildType": "dev",
-	"publisher": "spite-triangle",
+	"publisher": "young-triangle",
 	"homepage": "https://github.com/spite-triangle/copilot-completion",
 	"license": "SEE LICENSE IN LICENSE.txt",
 	"repository": {
@@ -57,6 +57,14 @@
           "type": "string",
           "default": "gpt-4o",
           "description": "GHOST model name"
+        },
+        "cc-completion.ghost.stops": {
+          "type": "array",
+          "default": [],
+          "description": "stop marks for response generation.",
+          "items": {
+            "type":"string"
+          }
         },
         "cc-completion.ghost.promptTemplate": {
           "type": "string",
@@ -133,6 +141,18 @@
           ],
           "default": "chat/completions",
           "description": "LLM API endpoint for NES"
+        },
+        "cc-completion.nes.family": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "openai-o",
+            "openai-gpt5",
+            "deepseek",
+            "qwen"
+          ],
+          "default": "standard",
+          "description": "Model family for NES thinking mode"
         },
         "cc-completion.nes.capabilities.limits.max_output_tokens": {
           "type": "number",
