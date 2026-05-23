@@ -8,6 +8,12 @@ export class OpenAICompletionAdapter implements ILLMAdapter {
         private readonly logService: ILogService,
     ) {}
 
+    async *sendStream(request: LLMRequest, signal?: AbortSignal): AsyncGenerator<string, LLMResponse> {
+        const result = await this.send(request, signal);
+        yield result.text;
+        return result;
+    }
+
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
         this.logService.debug(`[OpenAI] Sending request | model=${request.model} | maxTokens=${request.max_tokens} | temperature=${request.temperature}`);
 

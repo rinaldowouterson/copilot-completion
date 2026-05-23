@@ -4,6 +4,12 @@ import { readSSEStream } from './sseStream';
 
 export class OpenAIResponseAdapter implements ILLMAdapter {
 
+    async *sendStream(request: LLMRequest, signal?: AbortSignal): AsyncGenerator<string, LLMResponse> {
+        const result = await this.send(request, signal);
+        yield result.text;
+        return result;
+    }
+
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
         const url = `${request.baseUrl}/responses`;
         const input = (request.messages || []).map(m => ({ role: m.role, content: m.content }));

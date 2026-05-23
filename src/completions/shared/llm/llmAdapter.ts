@@ -6,6 +6,8 @@ export const ILLMAdapterManager = createServiceIdentifier<ILLMAdapterManager>('I
 
 export interface ILLMAdapter {
     send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse>;
+    /** Streaming variant: yields text deltas, returns the completed LLMResponse. */
+    sendStream(request: LLMRequest, signal?: AbortSignal): AsyncGenerator<string, LLMResponse>;
 }
 
 export interface ILLMAdapterManager {

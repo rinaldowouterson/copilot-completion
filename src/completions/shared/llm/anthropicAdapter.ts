@@ -4,6 +4,12 @@ import { readSSEStream } from './sseStream';
 
 export class AnthropicAdapter implements ILLMAdapter {
 
+    async *sendStream(request: LLMRequest, signal?: AbortSignal): AsyncGenerator<string, LLMResponse> {
+        const result = await this.send(request, signal);
+        yield result.text;
+        return result;
+    }
+
     async send(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse> {
         const url = `${request.baseUrl}/messages`;
         const messages = request.messages || [];
