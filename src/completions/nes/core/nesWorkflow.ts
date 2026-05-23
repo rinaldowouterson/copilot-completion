@@ -262,33 +262,29 @@ export class NesWorkflow {
         pipelineContext: ResponsePipelineContext,
         signal: AbortSignal,
     ): Promise<void> {
-        try {
-            let text = accumulated;
-            for await (const delta of stream) {
-                if (signal.aborted) return;
-                text += delta;
+        let text = accumulated;
+        for await (const delta of stream) {
+            if (signal.aborted) return;
+            text += delta;
+        }
+        // Cache results from the complete response in the background
+        const parsedLines = this._responsePipeline.process(text, pipelineContext);
+        if (parsedLines && parsedLines.length > 0 && !parsedLines.every(l => l.trim() === '')) {
+            const finalEdit = this._editFilterChain.apply(parsedLines, promptAssembly.editWindowLines);
+            if (finalEdit) {
+                const cacheEntry: CachedEdit = {
+                    docId,
+                    documentBeforeEdit: '',
+                    editWindow: {
+                        startLine: Math.max(0, position.line - 2),
+                        endLineExclusive: position.line + 6,
+                    },
+                    edit: finalEdit,
+                    cacheTime: Date.now(),
+                };
+                this._cache.setKthNextEdit(docId, cacheEntry);
+                this._log.debug(`[NES]  background_stream cached edit=${finalEdit.length}ch`);
             }
-            // Cache results from the complete response in the background
-            const parsedLines = this._responsePipeline.process(text, pipelineContext);
-            if (parsedLines && parsedLines.length > 0 && !parsedLines.every(l => l.trim() === '')) {
-                const finalEdit = this._editFilterChain.apply(parsedLines, promptAssembly.editWindowLines);
-                if (finalEdit) {
-                    const cacheEntry: CachedEdit = {
-                        docId,
-                        documentBeforeEdit: '',
-                        editWindow: {
-                            startLine: Math.max(0, position.line - 2),
-                            endLineExclusive: position.line + 6,
-                        },
-                        edit: finalEdit,
-                        cacheTime: Date.now(),
-                    };
-                    this._cache.setKthNextEdit(docId, cacheEntry);
-                    this._log.debug(`[NES]  background_stream cached edit=${finalEdit.length}ch`);
-                }
-            }
-        } catch (err) {
-            throw err;
         }
     }
 
