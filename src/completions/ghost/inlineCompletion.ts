@@ -1,19 +1,30 @@
 import * as vscode from 'vscode';
 import { IInstantiationService } from '../../di/instantiation';
+import { ICurrentGhostText, ILastGhostText } from '../../di/services';
 import { GhostTextComputer, GhostTextResult } from './ghostTextComputer';
 import { CurrentGhostText, LastGhostText } from './ghostTextState';
 
 export class GhostText {
+    private readonly _currentGhostText: CurrentGhostText;
+    private readonly _lastGhostText: LastGhostText;
+
     constructor(
         @IInstantiationService private readonly _instantiationService: IInstantiationService,
-    ) {}
+    ) {
+        this._currentGhostText = this._instantiationService.invokeFunction(
+            (accessor) => accessor.get(ICurrentGhostText)
+        );
+        this._lastGhostText = this._instantiationService.invokeFunction(
+            (accessor) => accessor.get(ILastGhostText)
+        );
+    }
 
     async getInlineCompletions(
         document: vscode.TextDocument,
         position: vscode.Position,
         token?: vscode.CancellationToken,
     ): Promise<GhostTextResult | undefined> {
-        const computer = this._instantiationService.createInstance(GhostTextComputer, new CurrentGhostText(), new LastGhostText());
+        const computer = this._instantiationService.createInstance(GhostTextComputer, this._currentGhostText, this._lastGhostText);
         return computer.getGhostText(document, position, token, false);
     }
 }
