@@ -13,12 +13,23 @@ import { EditResultAssembler } from './editResultAssembler';
 import { ResponsePipeline, ResponsePipelineContext } from '../response/responsePipeline';
 import { EditFilterChain } from '../response/editFilterChain';
 import { NesHistoryTracker } from './nesHistoryTracker';
+import { Deferred } from '../../../common/async';
 
 
 export interface NesExecutionResult {
     editResult: NextEditResult | undefined;
     /** Undefined when editResult exists or the request was cancelled/disabled early. */
     promptPieces?: PromptPieces;
+}
+
+interface PendingNesRequest {
+    headerRequestId: string;
+    documentUri: string;
+    documentText: string;
+    position: vscode.Position;
+    abortController: AbortController;
+    liveDependants: number;
+    deferred: Deferred<NesExecutionResult>;
 }
 
 export class NesWorkflow {
@@ -29,6 +40,8 @@ export class NesWorkflow {
     private readonly _resultAssembler: EditResultAssembler;
 
     private readonly _historyTracker = new NesHistoryTracker();
+
+    private _pendingRequest: PendingNesRequest | undefined;
 
     constructor(
         @INesConfigProvider private readonly _config: INesConfigProvider,
@@ -52,6 +65,49 @@ export class NesWorkflow {
     ): Promise<NesExecutionResult> {
         const t0 = Date.now();
         this._log.info(`[NES]  ===== START =====`);
+
+        // Step 0.5: Check for pending in-flight request
+        const docUri = document.uri.toString();
+        const docText = document.getText();
+
+        if (this._pendingRequest) {
+            const pending = this._pendingRequest;
+            const sameDoc = pending.documentUri === docUri && pending.documentText === docText;
+            const cursorNearby = Math.abs(pending.position.line - position.line) <= 10;
+
+            if (sameDoc && cursorNearby) {
+                // Join existing pending request
+                this._log.info(`[NES]  JOIN pending=${pending.headerRequestId} liveDependants=${pending.liveDependants}`);
+                pending.liveDependants++;
+
+                const cancelDisposable = token?.onCancellationRequested(() => {
+                    pending.liveDependants--;
+                    if (pending.liveDependants <= 0) {
+                        this._log.info(`[NES]  ABORT — all dependants gone (1000ms delay)`);
+                        setTimeout(() => {
+                            if (pending.liveDependants <= 0) {
+                                pending.abortController.abort();
+                            }
+                        }, 1000);
+                    }
+                });
+
+                try {
+                    const result = await pending.deferred.promise;
+                    this._log.info(`[NES]  JOIN_RESULT edit=${result.editResult?.edit.length ?? 0}ch`);
+                    return result;
+                } finally {
+                    pending.liveDependants--;
+                    cancelDisposable?.dispose();
+                }
+            }
+
+            // Document changed — clean up stale pending if no dependants
+            if (pending.liveDependants <= 0) {
+                this._log.debug(`[NES]  DISCARD stale pending request ${pending.headerRequestId}`);
+                this._pendingRequest = undefined;
+            }
+        }
 
         if (token?.isCancellationRequested) {
             this._log.info(`[NES]  CANCEL before_start`);
@@ -104,6 +160,22 @@ export class NesWorkflow {
         const endpoint = this._config.supportedEndpoint;
         const adapter = this._llmManager.getAdapter(endpoint);
         const abortController = new AbortController();
+        const headerRequestId = `nes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const deferred = new Deferred<NesExecutionResult>();
+        const pendingRequest: PendingNesRequest = {
+            headerRequestId,
+            documentUri: docUri,
+            documentText: docText,
+            position,
+            abortController,
+            liveDependants: 1,
+            deferred,
+        };
+        // Cancel any previous pending (stale), register new one
+        if (this._pendingRequest && this._pendingRequest.liveDependants <= 0) {
+            this._pendingRequest.abortController.abort();
+        }
+        this._pendingRequest = pendingRequest;
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         const cancelListener = token?.onCancellationRequested(() => {
             this._log.info(`[NES]  ABORT — CancellationToken triggered (1000ms delay)`);
@@ -197,7 +269,9 @@ export class NesWorkflow {
                 const totalMs = Date.now() - t0;
                 this._log.info(`[NES]  RESULT (streaming) edit=${firstResult.edit.length}ch total=${totalMs}ms`);
                 this._log.info(`edit = '${firstResult.edit}', editfull = '${firstResult.fullEditText}'\n range = (start = ${firstResult.range.start}, end =${firstResult.range.end}), cursorAfterEdit = ${firstResult.cursorAfterEdit}\njump = ${firstResult.isFromCursorJump}, ${firstResult.jumpToPosition}`);
-                return { editResult: firstResult, promptPieces: promptAssembly.promptPieces };
+                const nesResult: NesExecutionResult = { editResult: firstResult, promptPieces: promptAssembly.promptPieces };
+                deferred.resolve(nesResult);
+                return nesResult;
             }
 
             // Fallback: stream completed without finding an edit
@@ -246,18 +320,25 @@ export class NesWorkflow {
             this._log.info(`[NES]  RESULT (fallback) edit=${result.edit.length}ch total=${totalMs}ms`);
             this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start}, end =${result.range.end}), cursorAfterEdit = ${result.cursorAfterEdit}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
 
-            return { editResult: result, promptPieces: promptAssembly.promptPieces };
+            const nesResult: NesExecutionResult = { editResult: result, promptPieces: promptAssembly.promptPieces };
+            deferred.resolve(nesResult);
+            return nesResult;
 
         } catch (err) {
             if ((err as { name?: string })?.name === 'AbortError') {
                 this._log.info(`[NES]  ABORTED after ${Date.now() - t0}ms`);
+                deferred.resolve({ editResult: undefined });
                 return { editResult: undefined };
             }
             this._log.error(`[NES]  ERROR after ${Date.now() - t0}ms: ${err}`);
+            deferred.resolve({ editResult: undefined });
             return { editResult: undefined };
         } finally {
             if (cancelTimer) clearTimeout(cancelTimer);
             cancelListener?.dispose();
+            if (this._pendingRequest === pendingRequest) {
+                this._pendingRequest = undefined;
+            }
         }
     }
 
