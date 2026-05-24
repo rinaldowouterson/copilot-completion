@@ -222,8 +222,12 @@ export class GhostTextComputer {
         }
 
         const adapter = this._llmManager.getAdapter('completions');
+        const ourRequestId = `ghost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const asyncCancellationTokenSource = { cancel: () => abortController.abort() };
+
         try {
-            const response = await adapter.send(
+            // Initiate network request but DON'T await yet
+            const requestPromise = adapter.send(
                 {
                     baseUrl: this._config.baseUrl,
                     apiKey: this._config.apiKey,
@@ -240,12 +244,35 @@ export class GhostTextComputer {
                 },
                 abortController.signal,
             );
+
+            // Register as pending IMMEDIATELY — before awaiting
+            void this._asyncManager.queueCompletionRequest(
+                ourRequestId,
+                prefix,
+                suffix,
+                asyncCancellationTokenSource,
+                requestPromise.then(response => ({
+                    completionText: response.text,
+                    finishReason: response.finishReason,
+                })),
+            );
+
+            // Wait for result via async manager (handles both our own and reused requests)
+            const asyncResult = await this._asyncManager.getFirstMatchingRequest(
+                ourRequestId, prefix, suffix
+            );
+
+            if (!asyncResult) {
+                this._log.info(`[GHOST] NO_RESULT — getFirstMatchingRequest returned undefined total=${Date.now() - t0}ms`);
+                return undefined;
+            }
+
             const networkMs = (Date.now() - t5);
-            this._log.info(`[GHOST] NETWORK finish=${response.finishReason} text=${response.text.length}ch usage=${JSON.stringify(response.usage)} [${networkMs}ms]`);
-            this._log.debug('\n'+response.text);
+            this._log.info(`[GHOST] NETWORK finish=${asyncResult.finishReason} text=${asyncResult.completionText.length}ch [${networkMs}ms]`);
+            this._log.debug('\n'+asyncResult.completionText);
 
             // Step 9: Block trim
-            const rawText = response.text;
+            const rawText = asyncResult.completionText;
             const blockTrimmedText = requestMultiline
                 ? new VerboseBlockTrimmer().trim(rawText)
                 : new TerseBlockTrimmer().trim(rawText);
@@ -277,7 +304,7 @@ export class GhostTextComputer {
 
             // Step 12: Post-process (adjustLeadingWhitespace, displayText separation)
             const processed = this._postProcessChoiceInContext(
-                { text: trimmedText, finishReason: response.finishReason },
+                { text: trimmedText, finishReason: asyncResult.finishReason },
                 document,
                 position,
             );
@@ -291,7 +318,7 @@ export class GhostTextComputer {
             // Step 14: Cache & return
             const choices: CompletionChoice[] = [{
                 text: processed.text,
-                finishReason: response.finishReason,
+                finishReason: asyncResult.finishReason,
             }];
             this._cache.append(prefix, suffix, choices[0]);
 
@@ -299,17 +326,7 @@ export class GhostTextComputer {
             const ghostCompletion = this._toGhostCompletion(processed, document, position, isMiddleOfTheLine);
 
             // Store for typing-as-suggested on next keystroke
-            this._currentGhostText.setGhostText(prefix, suffix, [ghostCompletion], ResultType.Network, response.finishReason);
-
-            // Register with AsyncCompletionsManager for future reuse
-            const abortControllerForAsync = new AbortController();
-            this._asyncManager.queueCompletionRequest(
-                `ghost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                prefix,
-                suffix,
-                { cancel: () => abortControllerForAsync.abort() },
-                Promise.resolve({ completionText: ghostCompletion.completionText, finishReason: response.finishReason }),
-            );
+            this._currentGhostText.setGhostText(prefix, suffix, [ghostCompletion], ResultType.Network, asyncResult.finishReason);
 
             // Step 14: Return
             return {
