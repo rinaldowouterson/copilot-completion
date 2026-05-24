@@ -194,25 +194,28 @@ export class NesWorkflow {
             }, 1000);
         });
 
-        // Rate limiting: debounce — wait delayMs since last request start
-        const delayMs = 200;
-        lastRequestTime = Date.now();
-        const waitTime = delayMs;
-        this._log.debug(`[NES] rate_limiting delay=${waitTime}ms`);
-        await new Promise<void>((resolve, reject) => {
-            const tid = setTimeout(() => {
-                if (abortController.signal.aborted) {
-                    const err = new Error('Aborted');
-                    err.name = 'AbortError';
-                    reject(err);
-                    return;
-                }
-                lastRequestTime = Date.now();
-                resolve();
-            }, waitTime);
-            if (lastTimeoutId) clearTimeout(lastTimeoutId);
-            lastTimeoutId = tid;
-        });
+        // Rate limiting: enforce minimum interval between requests
+        const delayMs = 100;
+        const waitTime = Math.max(0, delayMs - (Date.now() - lastRequestTime));
+        if (waitTime > 0) {
+            this._log.debug(`[GHOST] rate_limiting delay=${waitTime}ms`);
+            await new Promise<void>((resolve, reject) => {
+                const tid = setTimeout(() => {
+                    if (abortController.signal.aborted) {
+                        const err = new Error('Aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                        return;
+                    }
+                    lastRequestTime = Date.now();
+                    resolve();
+                }, waitTime);
+                if (lastTimeoutId) clearTimeout(lastTimeoutId);
+                lastTimeoutId = tid;
+            });
+        } else {
+            lastRequestTime = Date.now();
+        }
 
         this._log.debug(`[NES]  endpoint=${endpoint} model=${this._config.model} max_tokens=${this._config.maxOutputTokens}`);
 

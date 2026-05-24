@@ -2,7 +2,7 @@
   "name": "copilot-completions",
   "displayName": "Copilot Completions",
   "description": "Code completion powered by LLM — GHOST (FIM) and NES (Next Edit Suggestion)",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "engines": {
     "vscode": "^1.110.0"
   },
@@ -182,7 +182,7 @@
         },
         "cc-completion.nes.suffixOverlapThreshold": {
           "type": "number",
-          "default": 0.9,
+          "default": 0.95,
           "description": "Suffix overlap similarity threshold for NES response trimming"
         },
         "cc-completion.nes.suffixOverlapType": {

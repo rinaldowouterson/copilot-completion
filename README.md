@@ -23,7 +23,7 @@ Code completion VS Code extension powered by LLMs — supporting both **GHOST** 
 
 - Predicts the developer's **next edit** anywhere in the current file (not just at the cursor)
 - **Edit window** resolution around the cursor with merge conflict marker awareness
-- **Cursor jump prediction**: anticipates where the developer will navigate next, including cross-file jumps
+- **Cursor jump prediction**: anticipates where the developer will navigate next. **This feature is not good for normal LLM.**
 - **Edit intent classification**: high / medium / low aggressiveness filtering
 - Response post-processing pipeline: boundary marker parsing → cursor tag stripping → line-level diff → suffix overlap trimming
 - Multiple response format handlers: edit-window, code-block, edit-intent, unified XML, custom diff-patch
@@ -36,7 +36,8 @@ Code completion VS Code extension powered by LLMs — supporting both **GHOST** 
 | `OpenAICompletionAdapter` | `/completions` | Native FIM (GHOST) |
 
 > [!tip]
-> `Qwen2.5 coder` is good for `GHOST`, which can run in local and provide better suggestion.
+> - `Qwen2.5 coder` is good for `GHOST`, which can run in local and provide better suggestion.
+> - `Qwen3.5 9B MIT` performs well for `GHOST` and `NES` individually. **however, running this LLM locally and using it for both GHOST and NES simultaneously will lead to slow inference when your computer lacks sufficient performance. The beast way is that `GHOST` and `NES` use different LLM.** 
 
 ## Configuration
 

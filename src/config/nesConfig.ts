@@ -67,7 +67,7 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     }
 
     get enabled(): boolean {
-        return this._context.workspaceState.get<boolean>(this._enabledKey, true);
+        return this._context.workspaceState.get<boolean>(this._enabledKey, false);
     }
 
     set enabled(value: boolean) {
@@ -132,7 +132,7 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     }
 
     get suffixOverlapThreshold(): number {
-        return this._cached<number>(ConfigKeys.Nes.suffixOverlapThreshold, 0.9);
+        return this._cached<number>(ConfigKeys.Nes.suffixOverlapThreshold, 0.95);
     }
 
     get suffixOverlapType(): 'low' | 'high' {
