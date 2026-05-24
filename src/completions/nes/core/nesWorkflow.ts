@@ -231,6 +231,10 @@ export class NesWorkflow {
                 accumulated += delta;
 
                 if (!firstEditResolved) {
+                    // Wait for end boundary marker before parsing (aligns with reference: first_edit = false after end marker)
+                    if (!accumulated.includes('###remain edit end boundary line###')) {
+                        continue;
+                    }
                     const parsedLines = this._responsePipeline.process(accumulated, pipelineContext);
                     if (parsedLines && parsedLines.length > 0 && !parsedLines.every(l => l.trim() === '')) {
                         const finalEdit = this._editFilterChain.apply(parsedLines, promptAssembly.editWindowLines);

@@ -25,7 +25,7 @@ export class BoundaryMarkerParser implements IResponseStage {
         const endIdx = lines.findIndex(l => l.trim() === endMarker);
 
         if (startIdx === -1 && endIdx === -1) {
-            return lines.filter(l => l.trim() !== '');
+            return [];  // wait for markers — don't return partial content
         }
 
         const begin = startIdx === -1 ? 0 : startIdx + 1;
