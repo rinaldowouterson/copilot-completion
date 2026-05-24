@@ -1,4 +1,6 @@
 import { LRUCacheMap } from '../../common/lruCacheMap';
+import { ReplaySubject } from '../../common/subject';
+import { Deferred } from '../../common/async';
 import { createServiceIdentifier } from '../../di/services';
 
 export const IAsyncCompletionsManager = createServiceIdentifier<IAsyncCompletionsManager>('IAsyncCompletionsManager');
@@ -13,7 +15,7 @@ export interface IAsyncCompletionsManager {
         suffix: string,
         cancellationTokenSource: { cancel(): void },
         resultPromise: Promise<AsyncCompletionResult>
-    ): void;
+    ): Promise<void>;
     getFirstMatchingRequest(
         headerRequestId: string,
         prefix: string,
@@ -28,25 +30,30 @@ export interface AsyncCompletionResult {
     finishReason: string;
 }
 
+enum AsyncCompletionRequestState {
+    Pending,
+    Completed,
+}
+
 interface BaseAsyncCompletionRequest {
     cancellationTokenSource: { cancel(): void };
     headerRequestId: string;
     prefix: string;
     suffix: string;
-}
-
-interface PendingRequest extends BaseAsyncCompletionRequest {
-    state: 'pending';
+    subject: ReplaySubject<AsyncCompletionRequest>;
     partialCompletionText?: string;
-    resultPromise: Promise<AsyncCompletionResult>;
 }
 
-interface CompletedRequest extends BaseAsyncCompletionRequest {
-    state: 'completed';
+interface PendingAsyncCompletionRequest extends BaseAsyncCompletionRequest {
+    state: AsyncCompletionRequestState.Pending;
+}
+
+interface CompletedAsyncCompletionRequest extends BaseAsyncCompletionRequest {
+    state: AsyncCompletionRequestState.Completed;
     result: AsyncCompletionResult;
 }
 
-type AsyncCompletionRequest = PendingRequest | CompletedRequest;
+type AsyncCompletionRequest = PendingAsyncCompletionRequest | CompletedAsyncCompletionRequest;
 
 export class AsyncCompletionsManager implements IAsyncCompletionsManager {
     readonly _serviceBrand: undefined;
@@ -58,7 +65,7 @@ export class AsyncCompletionsManager implements IAsyncCompletionsManager {
 
     shouldWaitForAsyncCompletions(prefix: string, suffix: string): boolean {
         for (const [, request] of this._requests) {
-            if (this._isCandidate(prefix, suffix, request)) {
+            if (_isCandidate(prefix, suffix, request)) {
                 return true;
             }
         }
@@ -67,8 +74,9 @@ export class AsyncCompletionsManager implements IAsyncCompletionsManager {
 
     updateCompletion(headerRequestId: string, text: string): void {
         const request = this._requests.get(headerRequestId);
-        if (!request || request.state !== 'pending') return;
+        if (!request) return;
         request.partialCompletionText = text;
+        request.subject.next(request);
     }
 
     queueCompletionRequest(
@@ -77,29 +85,36 @@ export class AsyncCompletionsManager implements IAsyncCompletionsManager {
         suffix: string,
         cts: { cancel(): void },
         resultPromise: Promise<AsyncCompletionResult>,
-    ): void {
+    ): Promise<void> {
+        const subject = new ReplaySubject<AsyncCompletionRequest>();
         this._requests.set(headerRequestId, {
-            state: 'pending',
+            state: AsyncCompletionRequestState.Pending,
             cancellationTokenSource: cts,
             headerRequestId,
             prefix,
             suffix,
-            resultPromise,
+            subject,
         });
 
-        resultPromise
+        return resultPromise
             .then(result => {
-                this._requests.set(headerRequestId, {
-                    state: 'completed',
+                this._requests.delete(headerRequestId);
+                const completed: CompletedAsyncCompletionRequest = {
+                    state: AsyncCompletionRequestState.Completed,
                     cancellationTokenSource: cts,
                     headerRequestId,
                     prefix,
                     suffix,
+                    subject,
                     result,
-                });
+                };
+                this._requests.set(headerRequestId, completed);
+                subject.next(completed);
+                subject.complete();
             })
             .catch(() => {
                 this._requests.delete(headerRequestId);
+                subject.error(new Error('Request failed'));
             });
     }
 
@@ -109,28 +124,63 @@ export class AsyncCompletionsManager implements IAsyncCompletionsManager {
         suffix: string,
     ): Promise<AsyncCompletionResult | undefined> {
         this._mostRecentRequestId = headerRequestId;
+        let resolved = false;
+        const deferred = new Deferred<AsyncCompletionResult | undefined>();
+        const subscriptions = new Map<string, () => void>();
 
-        for (const [, request] of this._requests) {
-            if (!this._isCandidate(prefix, suffix, request)) {
-                this._cancelStaleRequest(headerRequestId, request);
-                continue;
+        const finishRequest = (id: string) => () => {
+            const subscription = subscriptions.get(id);
+            if (subscription === undefined) return;
+            subscription();
+            subscriptions.delete(id);
+            if (!resolved && subscriptions.size === 0) {
+                resolved = true;
+                deferred.resolve(undefined);
             }
+        };
 
-            if (request.state === 'completed') {
-                const remainingPrefix = prefix.substring(request.prefix.length);
-                let { completionText } = request.result;
-                if (
-                    !completionText.startsWith(remainingPrefix) ||
-                    completionText.length <= remainingPrefix.length
-                ) {
-                    this._requests.delete(request.headerRequestId);
-                    continue;
+        const next = (request: AsyncCompletionRequest) => {
+            if (_isCandidate(prefix, suffix, request)) {
+                if (request.state === AsyncCompletionRequestState.Completed) {
+                    const remainingPrefix = prefix.substring(request.prefix.length);
+                    let { completionText } = request.result;
+                    if (
+                        !completionText.startsWith(remainingPrefix) ||
+                        completionText.length <= remainingPrefix.length
+                    ) {
+                        finishRequest(request.headerRequestId)();
+                        return;
+                    }
+                    completionText = completionText.substring(remainingPrefix.length);
+                    deferred.resolve({ ...request.result, completionText });
+                    resolved = true;
                 }
-                completionText = completionText.substring(remainingPrefix.length);
-                return { ...request.result, completionText };
+            } else {
+                this._cancelStaleRequest(headerRequestId, request);
+                finishRequest(request.headerRequestId)();
+            }
+        };
+
+        for (const [id, request] of this._requests) {
+            if (_isCandidate(prefix, suffix, request)) {
+                subscriptions.set(
+                    id,
+                    request.subject.subscribe({
+                        next,
+                        error: finishRequest(id),
+                        complete: finishRequest(id),
+                    })
+                );
+            } else {
+                this._cancelStaleRequest(headerRequestId, request);
             }
         }
-        return undefined;
+
+        return deferred.promise.finally(() => {
+            for (const dispose of subscriptions.values()) {
+                dispose();
+            }
+        });
     }
 
     cancelStaleRequests(headerRequestId: string): void {
@@ -144,24 +194,24 @@ export class AsyncCompletionsManager implements IAsyncCompletionsManager {
         this._requests.clear();
     }
 
-    private _isCandidate(prefix: string, suffix: string, request: AsyncCompletionRequest): boolean {
-        if (request.suffix !== suffix) return false;
-        if (!prefix.startsWith(request.prefix)) return false;
-        const remainingPrefix = prefix.substring(request.prefix.length);
-        if (request.state === 'completed') {
-            return (
-                request.result.completionText.startsWith(remainingPrefix) &&
-                request.result.completionText.trimEnd().length > remainingPrefix.length
-            );
-        }
-        if (request.partialCompletionText === undefined) return true;
-        return request.partialCompletionText.startsWith(remainingPrefix);
-    }
-
     private _cancelStaleRequest(headerRequestId: string, request: AsyncCompletionRequest): void {
         if (headerRequestId !== this._mostRecentRequestId) return;
-        if (request.state === 'completed') return;
+        if (request.state === AsyncCompletionRequestState.Completed) return;
         request.cancellationTokenSource.cancel();
         this._requests.delete(request.headerRequestId);
     }
+}
+
+function _isCandidate(prefix: string, suffix: string, request: AsyncCompletionRequest): boolean {
+    if (request.suffix !== suffix) return false;
+    if (!prefix.startsWith(request.prefix)) return false;
+    const remainingPrefix = prefix.substring(request.prefix.length);
+    if (request.state === AsyncCompletionRequestState.Completed) {
+        return (
+            request.result.completionText.startsWith(remainingPrefix) &&
+            request.result.completionText.trimEnd().length > remainingPrefix.length
+        );
+    }
+    if (request.partialCompletionText === undefined) return true;
+    return request.partialCompletionText.startsWith(remainingPrefix);
 }
