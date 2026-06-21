@@ -9,7 +9,7 @@ import { ILogService } from '../shared/log/logService';
 import { CurrentGhostText, LastGhostText } from './ghostTextState';
 import { IAsyncCompletionsManager } from './asyncCompletions';
 import { TerseBlockTrimmer, VerboseBlockTrimmer } from './blockTrimmer';
-import { TrimNESResponseSuffixOverlap } from '../../common/suffixOverlapTrim';
+import { TrimCompletionSuffixOverlap } from '../../common/suffixOverlapTrim';
 import { DiagnosticSummary, GhostCompletion, ResultType } from './types';
 import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';
 import { IMultilineStrategy } from './multiline/types';
@@ -383,7 +383,7 @@ export class GhostTextComputer {
     _trimLineSuffixOverlap(text: string, suffix: string): string {
         const completionLines = text.split('\n');
         const suffixLines = suffix.split('\n');
-        const trimmer = new TrimNESResponseSuffixOverlap(
+        const trimmer = new TrimCompletionSuffixOverlap(
             this._config.suffixOverlapThreshold,
             this._config.suffixOverlapType,
         );

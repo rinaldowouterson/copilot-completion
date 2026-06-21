@@ -4,7 +4,7 @@ import { CachedEdit } from '../nextEditCache';
 import { ResponseDiffer } from '../response/responseDiffer';
 import { LineReplacement } from '../response/lineReplacement';
 import { EditWindowResolver } from './editWindowResolver';
-import { TrimNESResponseSuffixOverlap } from '../../../common/suffixOverlapTrim';
+import { TrimCompletionSuffixOverlap } from '../../../common/suffixOverlapTrim';
 import { ILogService } from '../../shared/log/logService';
 
 export class EditResultAssembler {
@@ -67,7 +67,7 @@ export class EditResultAssembler {
             ? documentLines.slice(suffixStartLine)
             : [];
 
-        const trimmer = new TrimNESResponseSuffixOverlap(overlapThreshold, overlapType);
+        const trimmer = new TrimCompletionSuffixOverlap(overlapThreshold, overlapType);
         const overlapCount = trimmer.calculateOverlap(edit.newLines, suffixLines);
         logger?.info(`overlap count : ${overlapCount}`)
         if (overlapCount > 0) {

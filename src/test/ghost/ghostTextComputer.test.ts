@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { TrimNESResponseSuffixOverlap } from '../../common/suffixOverlapTrim';
+import { TrimCompletionSuffixOverlap } from '../../common/suffixOverlapTrim';
 
 suite('_trimLineSuffixOverlap', () => {
     /**
@@ -14,7 +14,7 @@ suite('_trimLineSuffixOverlap', () => {
     ): string {
         const completionLines = text.split('\n');
         const suffixLines = suffix.split('\n');
-        const trimmer = new TrimNESResponseSuffixOverlap(similarityThreshold, type);
+        const trimmer = new TrimCompletionSuffixOverlap(similarityThreshold, type);
         const overlapCount = trimmer.calculateOverlap(completionLines, suffixLines);
         if (overlapCount > 0 && overlapCount < completionLines.length) {
             return completionLines.slice(0, completionLines.length - overlapCount).join('\n');

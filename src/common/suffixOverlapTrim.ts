@@ -8,11 +8,11 @@ interface StatelessNextEditDocument {
 }
 
 /**
- * Filters out NES response lines that overlap with the original document suffix
+ * Filters out completion response lines that overlap with the original document suffix
  * (area_code_suffix and beyond), using Levenshtein-based similarity to handle
  * approximate matches and tolerate empty lines.
  */
-export class TrimNESResponseSuffixOverlap {
+export class TrimCompletionSuffixOverlap {
 
 	constructor(
 		public readonly similarityThreshold: number,
@@ -167,7 +167,7 @@ export class TrimNESResponseSuffixOverlap {
 				for (let b = 1; b <= targetLen; b++) {
 					const similarityLine = lineSimilarityTable[inputIdx][b - 1];
 
-					if (similarityLine >= 0.8) {
+					if (similarityLine >= 0.9) {
 						db[a][b].count = db[a - 1][b - 1].count + 1;
 						db[a][b].score = db[a - 1][b - 1].score + similarityLine;
 					} else {
