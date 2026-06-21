@@ -372,6 +372,26 @@ export class GhostTextComputer {
         return completion;
     }
 
+    // Line-level suffix overlap trimmer — shared across all 4 return paths
+    _trimLineSuffixOverlap(text: string, suffix: string): string {
+        const completionLines = text.split('\n');
+        const suffixLines = suffix.split('\n');
+        const trimmer = new TrimNESResponseSuffixOverlap(
+            this._config.suffixOverlapThreshold,
+            this._config.suffixOverlapType,
+        );
+        const overlapCount = trimmer.calculateOverlap(completionLines, suffixLines);
+        if (overlapCount > 0 && overlapCount < completionLines.length) {
+            this._log.info(`[GHOST] line_trim overlap=${overlapCount} lines`);
+            return completionLines.slice(0, completionLines.length - overlapCount).join('\n');
+        }
+        if (overlapCount >= completionLines.length) {
+            this._log.info(`[GHOST] line_trim ALL_LINES overlap=${overlapCount} >= ${completionLines.length} — returning empty`);
+            return '';
+        }
+        return text;
+    }
+
     private _postProcessChoiceInContext(
         choice: CompletionChoice,
         document: vscode.TextDocument,
