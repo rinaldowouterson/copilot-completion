@@ -86,14 +86,25 @@ export class GhostTextComputer {
         // Step 3.5: Typing-as-suggested check (via CurrentGhostText singleton)
         const typingSuggested = this._currentGhostText.getCompletionsForUserTyping(prefix, suffix);
         if (typingSuggested && typingSuggested.length > 0) {
-            this._log.info(`[GHOST] TYPING_AS_SUGGESTED count=${typingSuggested.length} total=${Date.now() - t0}ms`);
+            // Apply line-level suffix overlap trim to each completion, filter empty results
+            const trimmedCompletions = typingSuggested
+                .map(c => ({
+                    ...c,
+                    completionText: this._trimLineSuffixOverlap(c.completionText, suffix),
+                }))
+                .filter(c => c.completionText !== '');
+            if (trimmedCompletions.length === 0) {
+                this._log.info(`[GHOST] TYPING_AS_SUGGESTED all trimmed to empty total=${Date.now() - t0}ms`);
+                return undefined;
+            }
+            this._log.info(`[GHOST] TYPING_AS_SUGGESTED count=${trimmedCompletions.length}/${typingSuggested.length} total=${Date.now() - t0}ms`);
             return {
-                completions: typingSuggested.map(c => this._toGhostCompletion(
+                completions: trimmedCompletions.map(c => this._toGhostCompletion(
                     { text: c.completionText, finishReason: 'stop' },
                     document, position, isMiddleOfTheLine,
                 )),
                 resultType: ResultType.TypingAsSuggested,
-                suffixCoverage: this._calcSuffixCoverage(typingSuggested[0].completionText, suffix),
+                suffixCoverage: this._calcSuffixCoverage(trimmedCompletions[0].completionText, suffix),
             };
         }
 
