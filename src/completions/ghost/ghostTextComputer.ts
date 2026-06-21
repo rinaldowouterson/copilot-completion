@@ -309,21 +309,8 @@ export class GhostTextComputer {
                 this._log.info(`[GHOST] char_trim removed="${this._trunc(blockTrimmedText.slice(charTrimmedText.length), 40)}"`);
             }
 
-            // Step 11: Line-level suffix overlap
-            const completionLines = charTrimmedText.split('\n');
-            const suffixLines = suffix.split('\n');
-            const overlapTrimmer = new TrimNESResponseSuffixOverlap(
-                this._config.suffixOverlapThreshold,
-                this._config.suffixOverlapType,
-            );
-            const lineOverlapCount = overlapTrimmer.calculateOverlap(completionLines, suffixLines);
-            const trimmedLines = lineOverlapCount > 0
-                ? completionLines.slice(0, completionLines.length - lineOverlapCount)
-                : completionLines;
-            if (lineOverlapCount > 0) {
-                this._log.info(`[GHOST] line_trim overlap=${lineOverlapCount} lines`);
-            }
-            const trimmedText = trimmedLines.join('\n');
+            // Step 11: Line-level suffix overlap (via shared method)
+            const trimmedText = this._trimLineSuffixOverlap(charTrimmedText, suffix);
 
             // Step 12: Post-process (adjustLeadingWhitespace, displayText separation)
             const processed = this._postProcessChoiceInContext(
