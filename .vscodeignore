@@ -12,3 +12,19 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+# Internal tooling / scaffolding (not runtime)
+.claude/**
+.superpowers/**
+.traces/**
+.vscode-test.mjs
+.vscode-test/**
+
+# Build / dependency artifacts
+package-lock.json
+
+# End-user VSIX built artifacts (don't recursively package prior VSIX files)
+*.vsix
+
+# Design docs / specs are repo-only, never run at extension runtime
+docs/**
