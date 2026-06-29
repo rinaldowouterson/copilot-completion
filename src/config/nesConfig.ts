@@ -104,11 +104,9 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     }
 
     get apiKey(): string {
-        const fromSecret = this._secrets.getNesApiKey();
-        if (fromSecret) {
-            return fromSecret;
-        }
-        return this._cached<string>(ConfigKeys.Nes.apiKey, '');
+        // SecretStorage only. settings.json entries are inert after the
+        // initial migration runs in activate(); they are never read here.
+        return this._secrets.getNesApiKey();
     }
 
     get model(): string {

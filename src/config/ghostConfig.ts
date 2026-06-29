@@ -83,13 +83,9 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
     }
 
     get apiKey(): string {
-        // Prefer SecretStorage; fall back to plaintext settings.json during
-        // initial migration. Sync because adapters depend on a sync getter.
-        const fromSecret = this._secrets.getGhostApiKey();
-        if (fromSecret) {
-            return fromSecret;
-        }
-        return this._cached<string>(ConfigKeys.Ghost.apiKey, '');
+        // SecretStorage only. settings.json entries are inert after the
+        // initial migration runs in activate(); they are never read here.
+        return this._secrets.getGhostApiKey();
     }
 
     get model(): string {
