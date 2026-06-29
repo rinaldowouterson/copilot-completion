@@ -209,7 +209,7 @@ export class GhostTextComputer {
         const abortController = new AbortController();
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         const cancelListener = token?.onCancellationRequested(() => {
-            this._log.info(`[GHOST] ABORT — CancellationToken triggered (1000ms delay)`);
+            this._log.info(`[GHOST] ABORT — CancellationToken triggered (${this._config.responseTimeout}ms delay)`);
             if (cancelTimer) clearTimeout(cancelTimer);
             cancelTimer = setTimeout(() => {
                 if (abortController.signal.aborted) return;
@@ -217,13 +217,13 @@ export class GhostTextComputer {
                     this._log.info(`[GHOST] ABORT — skipped, active waiters present`);
                     return;
                 }
-                this._log.info(`[GHOST] ABORT — executing after 1000ms delay`);
+                this._log.info(`[GHOST] ABORT — executing after ${this._config.responseTimeout}ms delay`);
                 abortController.abort();
-            }, 1000);
+            }, this._config.responseTimeout);
         });
 
         // Rate limiting: enforce minimum interval between requests
-        const delayMs = this._config.delay;
+        const delayMs = this._config.debounceTimeout;
         const waitTime = Math.max(0, delayMs - (Date.now() - lastRequestTime));
         if (waitTime > 0) {
             this._log.debug(`[GHOST] rate_limiting delay=${waitTime}ms`);

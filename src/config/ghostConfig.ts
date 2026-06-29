@@ -23,7 +23,8 @@ export interface IGhostConfigProvider {
     get promptTemplate(): string;
     get capabilities(): GhostCapabilities;
     get maxOutputTokens(): number;
-    get delay(): number;
+    get debounceTimeout(): number;
+    get responseTimeout(): number;
     get suffixOverlapThreshold(): number;
     get suffixOverlapType(): 'low' | 'high';
     get presencePenalty(): number;
@@ -54,6 +55,20 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
         _context.subscriptions.push(
             _secrets.onDidChange(() => { this._cache.clear(); }),
         );
+        // One-shot migration: clear legacy key if present
+        // This avoids stale `delay` entries in settings.json after the rename.
+        this._migrateLegacyKeys();
+    }
+
+    private _migrateLegacyKeys(): void {
+        const config = vscode.workspace.getConfiguration('cc-completion.ghost');
+        const legacyDelay = config.inspect<number>('capabilities.limits.delay');
+        if (legacyDelay?.globalValue !== undefined) {
+            config.update('capabilities.limits.delay', undefined, vscode.ConfigurationTarget.Global);
+        }
+        if (legacyDelay?.workspaceValue !== undefined) {
+            config.update('capabilities.limits.delay', undefined, vscode.ConfigurationTarget.Workspace);
+        }
     }
 
     private _cached<T>(key: string, defaultValue: T): T {
@@ -122,8 +137,12 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
         return this._cached<number>(ConfigKeys.Ghost.maxOutputTokens, 512);
     }
 
-    get delay(): number {
-        return this._cached<number>(ConfigKeys.Ghost.delay, 150);
+    get debounceTimeout(): number {
+        return this._cached<number>(ConfigKeys.Ghost.debounceTimeout, 150);
+    }
+
+    get responseTimeout(): number {
+        return this._cached<number>(ConfigKeys.Ghost.responseTimeout, 1000);
     }
 
     get suffixOverlapThreshold(): number {
