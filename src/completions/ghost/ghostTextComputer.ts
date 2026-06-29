@@ -15,8 +15,8 @@ import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';
 import { IMultilineStrategy } from './multiline/types';
 import { MultilineContextBuilder } from './multiline/MultilineContextBuilder';
 
-// Module-level rate limiting (matches original fetch.ts design)
-let lastRequestTime = 0;
+// Module-level debounce: reset on each cancellation (user keystroke), fire after silence
+let lastCancelledTime = 0;
 let lastTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 export interface GhostTextResult {
@@ -51,7 +51,7 @@ export class GhostTextComputer {
 
         // Step 0: Check cancellation before any work
         if (token?.isCancellationRequested) {
-            this._log.info(`[GHOST] CANCEL before_start`);
+            this._log.info(`[GHOST] SKIP — token cancelled before any work`);
             return undefined;
         }
 
@@ -131,7 +131,7 @@ export class GhostTextComputer {
         this._log.debug(`[GHOST] cache_miss [${Date.now() - t2}ms]`);
 
         if (token?.isCancellationRequested) {
-            this._log.info(`[GHOST] CANCEL after_cache_check`);
+            this._log.info(`[GHOST] SKIP — token cancelled after cache check`);
             return undefined;
         }
 
@@ -161,7 +161,7 @@ export class GhostTextComputer {
                     suffixCoverage,
                 };
             }
-            this._log.info(`[GHOST] async_wait — no matching request found`);
+            this._log.info(`[GHOST] async_wait — in-flight requests already consumed or aborted`);
         }
 
         // Step 5: Collect diagnostics
@@ -184,7 +184,7 @@ export class GhostTextComputer {
         this._log.debug('\n' + prompt);
 
         if (token?.isCancellationRequested) {
-            this._log.info(`[GHOST] CANCEL after_prompt_build`);
+            this._log.info(`[GHOST] SKIP — token cancelled, prompt built but not sent`);
             return undefined;
         }
 
@@ -209,41 +209,47 @@ export class GhostTextComputer {
         const abortController = new AbortController();
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         const cancelListener = token?.onCancellationRequested(() => {
-            this._log.info(`[GHOST] ABORT — CancellationToken triggered (${this._config.responseTimeout}ms delay)`);
+            lastCancelledTime = Date.now();
+            this._log.info(`[GHOST] CANCELLED — user typed, abort in ${this._config.responseTimeout}ms`);
             if (cancelTimer) clearTimeout(cancelTimer);
             cancelTimer = setTimeout(() => {
                 if (abortController.signal.aborted) return;
                 if (this._asyncManager.hasActiveWaiters()) {
-                    this._log.info(`[GHOST] ABORT — skipped, active waiters present`);
+                    this._log.info(`[GHOST] CANCELLED — waiters present, abort suppressed, request kept alive`);
                     return;
                 }
-                this._log.info(`[GHOST] ABORT — executing after ${this._config.responseTimeout}ms delay`);
+                this._log.info(`[GHOST] ABORT — executing`);
                 abortController.abort();
             }, this._config.responseTimeout);
         });
 
-        // Rate limiting: enforce minimum interval between requests
-        const delayMs = this._config.debounceTimeout;
-        const waitTime = Math.max(0, delayMs - (Date.now() - lastRequestTime));
-        if (waitTime > 0) {
-            this._log.debug(`[GHOST] rate_limiting delay=${waitTime}ms`);
+        // Debounce: wait for silence after the last keystroke before firing.
+        // Skip the wait on the first character of a burst (no recent cancellation).
+        // On cancellation, the timer self-corrects via recursive checkElapsed.
+        const debounceMs = this._config.debounceTimeout;
+        const sinceLastCancel = Date.now() - lastCancelledTime;
+        const isFreshBurst = lastCancelledTime === 0 || sinceLastCancel >= debounceMs * 2;
+        if (debounceMs > 0 && !isFreshBurst) {
             await new Promise<void>((resolve, reject) => {
-                const tid = setTimeout(() => {
+                const checkElapsed = () => {
                     if (abortController.signal.aborted) {
                         const err = new Error('Aborted');
                         err.name = 'AbortError';
                         reject(err);
                         return;
                     }
-                    lastRequestTime = Date.now();
-                    resolve();
-                }, waitTime);
-                if (lastTimeoutId) clearTimeout(lastTimeoutId);
-                lastTimeoutId = tid;
+                    const elapsed = Date.now() - lastCancelledTime;
+                    if (elapsed >= debounceMs) {
+                        resolve();
+                    } else {
+                        if (lastTimeoutId) clearTimeout(lastTimeoutId);
+                        lastTimeoutId = setTimeout(checkElapsed, debounceMs - elapsed);
+                    }
+                };
+                checkElapsed();
             });
-        } else {
-            lastRequestTime = Date.now();
         }
+        this._log.debug(`[GHOST] debounce fresh_burst=${isFreshBurst} waited=${debounceMs}ms`);
 
         const adapter = this._llmManager.getAdapter('completions');
         const ourRequestId = `ghost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -288,7 +294,7 @@ export class GhostTextComputer {
             );
 
             if (!asyncResult) {
-                this._log.info(`[GHOST] NO_RESULT — getFirstMatchingRequest returned undefined total=${Date.now() - t0}ms`);
+                this._log.info(`[GHOST] NO_RESULT — in-flight request aborted, no result available total=${Date.now() - t0}ms`);
                 return undefined;
             }
 
@@ -348,7 +354,7 @@ export class GhostTextComputer {
             };
         } catch (err) {
             if ((err as {name?: string})?.name === 'AbortError') {
-                this._log.info(`[GHOST] ABORTED after ${Date.now() - t0}ms`);
+                this._log.info(`[GHOST] ABORTED — request cancelled after ${Date.now() - t0}ms`);
                 return undefined;
             }
             this._log.error(`[GHOST] ERROR after ${Date.now() - t0}ms: ${err}`);
