@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createServiceIdentifier } from '../di/services';
 import { ConfigKeys } from './configKeys';
+import { ISecretConfig } from './secretConfig';
 
 export interface GhostCapabilities {
     limits: {
@@ -38,13 +39,20 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
     private readonly _stateKey = 'ghost.enabled';
     private readonly _cache = new Map<string, unknown>();
 
-    constructor(private readonly _context: vscode.ExtensionContext) {
+    constructor(
+        private readonly _context: vscode.ExtensionContext,
+        private readonly _secrets: ISecretConfig,
+    ) {
         _context.subscriptions.push(
             vscode.workspace.onDidChangeConfiguration(e => {
                 if (e.affectsConfiguration('cc-completion.ghost')) {
                     this._cache.clear();
                 }
             }),
+        );
+        // Invalidate caches when api key moves (set/delete/migrate).
+        _context.subscriptions.push(
+            _secrets.onDidChange(() => { this._cache.clear(); }),
         );
     }
 
@@ -75,6 +83,12 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
     }
 
     get apiKey(): string {
+        // Prefer SecretStorage; fall back to plaintext settings.json during
+        // initial migration. Sync because adapters depend on a sync getter.
+        const fromSecret = this._secrets.getGhostApiKey();
+        if (fromSecret) {
+            return fromSecret;
+        }
         return this._cached<string>(ConfigKeys.Ghost.apiKey, '');
     }
 

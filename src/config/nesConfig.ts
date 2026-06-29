@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createServiceIdentifier } from '../di/services';
 import { ConfigKeys } from './configKeys';
+import { ISecretConfig } from './secretConfig';
 
 export type NesSupportedEndpoint = 'chat/completions' | 'responses' | 'messages';
 
@@ -47,13 +48,19 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     private readonly _ncpKey = 'nes.nextCursorPredictionEnabled';
     private readonly _cache = new Map<string, unknown>();
 
-    constructor(private readonly _context: vscode.ExtensionContext) {
+    constructor(
+        private readonly _context: vscode.ExtensionContext,
+        private readonly _secrets: ISecretConfig,
+    ) {
         _context.subscriptions.push(
             vscode.workspace.onDidChangeConfiguration(e => {
                 if (e.affectsConfiguration('cc-completion.nes')) {
                     this._cache.clear();
                 }
             }),
+        );
+        _context.subscriptions.push(
+            _secrets.onDidChange(() => { this._cache.clear(); }),
         );
     }
 
@@ -97,6 +104,10 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
     }
 
     get apiKey(): string {
+        const fromSecret = this._secrets.getNesApiKey();
+        if (fromSecret) {
+            return fromSecret;
+        }
         return this._cached<string>(ConfigKeys.Nes.apiKey, '');
     }
 

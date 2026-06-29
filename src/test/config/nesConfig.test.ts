@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { VSCodeNesConfigProvider } from '../../config/nesConfig';
+import { ISecretConfig } from '../../config/secretConfig';
 
 function mockContext(): vscode.ExtensionContext {
     const state = new Map<string, unknown>();
@@ -13,15 +14,30 @@ function mockContext(): vscode.ExtensionContext {
     } as unknown as vscode.ExtensionContext;
 }
 
+function mockSecrets(): ISecretConfig {
+    const noop = () => {};
+    return {
+        _serviceBrand: undefined,
+        getGhostApiKey: () => '',
+        getNesApiKey: () => '',
+        setGhostApiKey: async () => {},
+        setNesApiKey: async () => {},
+        deleteGhostApiKey: async () => {},
+        deleteNesApiKey: async () => {},
+        migrateFromPlaintext: async () => ({ ghost: false, nes: false }),
+        onDidChange: (l: () => void) => { noop(); return { dispose: noop }; },
+    };
+}
+
 suite('VSCodeNesConfigProvider', () => {
 
     test('returns default model when no config set', () => {
-        const provider = new VSCodeNesConfigProvider(mockContext());
+        const provider = new VSCodeNesConfigProvider(mockContext(), mockSecrets());
         assert.strictEqual(provider.model, 'gpt-4o');
     });
 
     test('returns updated value after config change invalidates cache', async () => {
-        const provider = new VSCodeNesConfigProvider(mockContext());
+        const provider = new VSCodeNesConfigProvider(mockContext(), mockSecrets());
         const config = vscode.workspace.getConfiguration('cc-completion.nes');
 
         // Prime the cache
@@ -39,7 +55,7 @@ suite('VSCodeNesConfigProvider', () => {
     });
 
     test('enabled is independent of settings.json cache', () => {
-        const provider = new VSCodeNesConfigProvider(mockContext());
+        const provider = new VSCodeNesConfigProvider(mockContext(), mockSecrets());
 
         const initialEnabled = provider.enabled;
         provider.enabled = false;
@@ -52,7 +68,7 @@ suite('VSCodeNesConfigProvider', () => {
     });
 
     test('nextCursorPredictionEnabled uses workspaceState', () => {
-        const provider = new VSCodeNesConfigProvider(mockContext());
+        const provider = new VSCodeNesConfigProvider(mockContext(), mockSecrets());
 
         assert.strictEqual(provider.nextCursorPredictionEnabled, false);
         provider.nextCursorPredictionEnabled = true;
@@ -60,7 +76,7 @@ suite('VSCodeNesConfigProvider', () => {
     });
 
     test('family defaults to standard', () => {
-        const provider = new VSCodeNesConfigProvider(mockContext());
+        const provider = new VSCodeNesConfigProvider(mockContext(), mockSecrets());
         assert.strictEqual(provider.family, 'standard');
     });
 });

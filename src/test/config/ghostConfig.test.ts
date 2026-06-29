@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { VSCodeGhostConfigProvider } from '../../config/ghostConfig';
+import { ISecretConfig } from '../../config/secretConfig';
 
 function mockContext(): vscode.ExtensionContext {
     const state = new Map<string, unknown>();
@@ -13,15 +14,30 @@ function mockContext(): vscode.ExtensionContext {
     } as unknown as vscode.ExtensionContext;
 }
 
+function mockSecrets(): ISecretConfig {
+    const noop = () => {};
+    return {
+        _serviceBrand: undefined,
+        getGhostApiKey: () => '',
+        getNesApiKey: () => '',
+        setGhostApiKey: async () => {},
+        setNesApiKey: async () => {},
+        deleteGhostApiKey: async () => {},
+        deleteNesApiKey: async () => {},
+        migrateFromPlaintext: async () => ({ ghost: false, nes: false }),
+        onDidChange: (l: () => void) => { noop(); return { dispose: noop }; },
+    };
+}
+
 suite('VSCodeGhostConfigProvider', () => {
 
     test('returns default model when no config set', () => {
-        const provider = new VSCodeGhostConfigProvider(mockContext());
+        const provider = new VSCodeGhostConfigProvider(mockContext(), mockSecrets());
         assert.strictEqual(provider.model, 'gpt-4o');
     });
 
     test('returns updated value after config change invalidates cache', async () => {
-        const provider = new VSCodeGhostConfigProvider(mockContext());
+        const provider = new VSCodeGhostConfigProvider(mockContext(), mockSecrets());
         const config = vscode.workspace.getConfiguration('cc-completion.ghost');
 
         assert.strictEqual(provider.model, 'gpt-4o');
@@ -33,7 +49,7 @@ suite('VSCodeGhostConfigProvider', () => {
     });
 
     test('returns default promptTemplate when no config set', () => {
-        const provider = new VSCodeGhostConfigProvider(mockContext());
+        const provider = new VSCodeGhostConfigProvider(mockContext(), mockSecrets());
         assert.strictEqual(
             provider.promptTemplate,
             '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>',
@@ -41,7 +57,7 @@ suite('VSCodeGhostConfigProvider', () => {
     });
 
     test('enabled is independent of settings.json cache', () => {
-        const provider = new VSCodeGhostConfigProvider(mockContext());
+        const provider = new VSCodeGhostConfigProvider(mockContext(), mockSecrets());
 
         const initialEnabled = provider.enabled;
         provider.enabled = false;

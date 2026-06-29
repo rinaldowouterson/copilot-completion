@@ -38,6 +38,26 @@
       {
         "command": "cc-completion.togglePanel",
         "title": "Toggle Copilot Completion Panel"
+      },
+      {
+        "command": "cc-completion.setGhostApiKey",
+        "title": "CC Completion: Set GHOST API Key (secure storage)",
+        "category": "CC Completion"
+      },
+      {
+        "command": "cc-completion.setNesApiKey",
+        "title": "CC Completion: Set NES API Key (secure storage)",
+        "category": "CC Completion"
+      },
+      {
+        "command": "cc-completion.clearGhostApiKey",
+        "title": "CC Completion: Clear GHOST API Key",
+        "category": "CC Completion"
+      },
+      {
+        "command": "cc-completion.clearNesApiKey",
+        "title": "CC Completion: Clear NES API Key",
+        "category": "CC Completion"
       }
     ],
     "configuration": {
@@ -49,9 +69,9 @@
           "description": "GHOST API base URL"
         },
         "cc-completion.ghost.apiKey": {
-          "type": "string",
+          "type": "password",
           "default": "",
-          "description": "GHOST API key"
+          "markdownDescription": "**Deprecated** — prefer the command palette: *CC Completion: Set GHOST API Key (secure storage)*. Stored in SecretStorage by default; this plaintext entry is auto-cleared after migration."
         },
         "cc-completion.ghost.model": {
           "type": "string",
@@ -125,9 +145,9 @@
           "description": "NES API base URL"
         },
         "cc-completion.nes.apiKey": {
-          "type": "string",
+          "type": "password",
           "default": "",
-          "description": "NES API key"
+          "markdownDescription": "**Deprecated** — prefer the command palette: *CC Completion: Set NES API Key (secure storage)*. Stored in SecretStorage by default; this plaintext entry is auto-cleared after migration."
         },
         "cc-completion.nes.model": {
           "type": "string",

@@ -5,6 +5,7 @@ import { IInstantiationService } from './di/instantiation';
 // Config
 import { IGhostConfigProvider, VSCodeGhostConfigProvider } from './config/ghostConfig';
 import { INesConfigProvider, VSCodeNesConfigProvider } from './config/nesConfig';
+import { ISecretConfig, VSCodeSecretConfig } from './config/secretConfig';
 
 // Shared
 import { ILogService, LogService } from './completions/shared/log/logService';
@@ -43,8 +44,11 @@ export function activate(context: vscode.ExtensionContext) {
     const builder = new InstantiationServiceBuilder();
 
     // === Config (direct instances, with context for workspaceState) ===
-    const ghostConfig = new VSCodeGhostConfigProvider(context);
-    const nesConfig = new VSCodeNesConfigProvider(context);
+    const secrets = new VSCodeSecretConfig(context);
+    builder.define(ISecretConfig, secrets);
+
+    const ghostConfig = new VSCodeGhostConfigProvider(context, secrets);
+    const nesConfig = new VSCodeNesConfigProvider(context, secrets);
     builder.define(IGhostConfigProvider, ghostConfig);
     builder.define(INesConfigProvider, nesConfig);
 
@@ -72,6 +76,25 @@ export function activate(context: vscode.ExtensionContext) {
     // Seal
     const instantiationService = builder.seal();
     context.subscriptions.push(instantiationService);
+
+    // One-shot migration of plaintext settings.json apiKey entries into SecretStorage.
+    // Idempotent — running again with empty plaintext is a no-op.
+    void secrets.migrateFromPlaintext().then(migrated => {
+        if (migrated.ghost || migrated.nes) {
+            const count = (migrated.ghost ? 1 : 0) + (migrated.nes ? 1 : 0);
+            vscode.window.showInformationMessage(
+                `CC Completion: ${count} API key${count === 1 ? '' : 's'} moved to secure storage.`,
+            );
+        }
+    });
+
+    // Commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('cc-completion.setGhostApiKey', () => setApiKeyCommand(secrets, 'ghost')),
+        vscode.commands.registerCommand('cc-completion.setNesApiKey', () => setApiKeyCommand(secrets, 'nes')),
+        vscode.commands.registerCommand('cc-completion.clearGhostApiKey', () => clearApiKeyCommand(secrets, 'ghost')),
+        vscode.commands.registerCommand('cc-completion.clearNesApiKey', () => clearApiKeyCommand(secrets, 'nes')),
+    );
 
     // Register LLM adapters
     registerLLMAdapters(instantiationService, ghostConfig, nesConfig, logService);
@@ -132,3 +155,54 @@ function registerLLMAdapters(
 }
 
 export function deactivate() {}
+
+/**
+ * Prompt user for an API key and store it in SecretStorage.
+ * Re-entry without clearing the secret shows the existing value.
+ */
+async function setApiKeyCommand(
+    secrets: ISecretConfig,
+    pipeline: 'ghost' | 'nes',
+): Promise<void> {
+    const current = pipeline === 'ghost' ? secrets.getGhostApiKey() : secrets.getNesApiKey();
+    const input = await vscode.window.showInputBox({
+        prompt: `Enter ${pipeline.toUpperCase()} API key`,
+        password: true,
+        ignoreFocusOut: true,
+        placeHolder: current ? '(set — leave blank to keep, type new value to replace)' : 'paste key',
+    });
+
+    if (input === undefined) {
+        return; // user cancelled
+    }
+    if (input.trim() === '') {
+        return; // unchanged
+    }
+
+    if (pipeline === 'ghost') {
+        await secrets.setGhostApiKey(input.trim());
+    } else {
+        await secrets.setNesApiKey(input.trim());
+    }
+    vscode.window.showInformationMessage(`CC Completion: ${pipeline.toUpperCase()} API key saved to secure storage.`);
+}
+
+async function clearApiKeyCommand(
+    secrets: ISecretConfig,
+    pipeline: 'ghost' | 'nes',
+): Promise<void> {
+    const confirmed = await vscode.window.showWarningMessage(
+        `Clear ${pipeline.toUpperCase()} API key from secure storage?`,
+        { modal: true },
+        'Clear',
+    );
+    if (confirmed !== 'Clear') {
+        return;
+    }
+    if (pipeline === 'ghost') {
+        await secrets.deleteGhostApiKey();
+    } else {
+        await secrets.deleteNesApiKey();
+    }
+    vscode.window.showInformationMessage(`CC Completion: ${pipeline.toUpperCase()} API key cleared.`);
+}
