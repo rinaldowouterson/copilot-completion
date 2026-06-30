@@ -16,6 +16,7 @@ import { IMultilineStrategy } from './multiline/types';
 import { MultilineContextBuilder } from './multiline/MultilineContextBuilder';
 import { IContextBuilderService } from '../context/contextBuilderService';
 import { notifyCancelled, waitForDebounce, getLastCancelledTime } from '../../common/requestDebounce';
+import { containsChatMarkup } from '../../common/chatMarkup';
 
 export interface GhostTextResult {
     completions: GhostCompletion[];
@@ -81,6 +82,12 @@ export class GhostTextComputer {
         this._log.debug(`[GHOST] prefix=${prefix.length}ch suffix=${suffix.length}ch [${Date.now() - t1}ms]`);
         this._log.debug(`[GHOST] prefix_tail="${this._trunc(prefix, 80)}"`);
         this._log.debug(`[GHOST] suffix_head="${this._trunc(suffix, 80)}"`);
+
+        // Step 3.6: Reject chat editing markup (leaked session tags in document)
+        if (containsChatMarkup(prefix) || containsChatMarkup(suffix)) {
+            this._log.info(`[GHOST] SKIP — chat editing markup in document`);
+            return undefined;
+        }
 
         // Step 3.5: Typing-as-suggested check (via CurrentGhostText singleton)
         const typingSuggested = this._currentGhostText.getCompletionsForUserTyping(prefix, suffix);
@@ -329,6 +336,12 @@ export class GhostTextComputer {
                 finishReason: asyncResult.finishReason,
             }];
             this._cache.append(prefix, suffix, choices[0]);
+
+            // Step 13.5: Reject if the model reproduced chat editing markup
+            if (containsChatMarkup(processed.text)) {
+                this._log.info(`[GHOST] SKIP — result contains chat editing markup`);
+                return undefined;
+            }
 
             // Step 13.5: Build GhostCompletion
             const ghostCompletion = this._toGhostCompletion(processed, document, position, isMiddleOfTheLine);

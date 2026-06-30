@@ -16,6 +16,7 @@ import { NesHistoryTracker } from './nesHistoryTracker';
 import { IContextBuilderService } from '../../context/contextBuilderService';
 import { Deferred } from '../../../common/async';
 import { notifyCancelled, waitForDebounce } from '../../../common/requestDebounce';
+import { containsChatMarkup } from '../../../common/chatMarkup';
 
 export interface NesExecutionResult {
     editResult: NextEditResult | undefined;
@@ -68,9 +69,15 @@ export class NesWorkflow {
         const t0 = Date.now();
         this._log.info(`[NES]  ===== START =====`);
 
-        // Step 0.5: Check for pending in-flight request
-        const docUri = document.uri.toString();
+        // Step 0.5: Reject chat editing markup (leaked session tags in document)
         const docText = document.getText();
+        if (containsChatMarkup(docText)) {
+            this._log.info(`[NES]  SKIP — chat editing markup in document`);
+            return { editResult: undefined };
+        }
+
+        // Step 0.6: Check for pending in-flight request
+        const docUri = document.uri.toString();
 
         if (this._pendingRequest) {
             const pending = this._pendingRequest;
@@ -292,6 +299,10 @@ export class NesWorkflow {
 
             // If first edit was found during streaming, return it immediately
             if (firstResult) {
+                if (containsChatMarkup(firstResult.edit) || containsChatMarkup(firstResult.fullEditText)) {
+                    this._log.info(`[NES]  SKIP — result contains chat editing markup`);
+                    return { editResult: undefined, promptPieces: promptAssembly.promptPieces };
+                }
                 const totalMs = Date.now() - t0;
                 this._log.info(`[NES]  RESULT (streaming) edit=${firstResult.edit.length}ch total=${totalMs}ms`);
                 this._log.info(`edit = '${firstResult.edit}', editfull = '${firstResult.fullEditText}'\n range = (start = ${firstResult.range.start.line}:${firstResult.range.start.character}, end = ${firstResult.range.end.line}:${firstResult.range.end.character}), cursorAfterEdit = ${firstResult.cursorAfterEdit ? `${firstResult.cursorAfterEdit.line}:${firstResult.cursorAfterEdit.character}` : 'none'}\njump = ${firstResult.isFromCursorJump}, ${firstResult.jumpToPosition}`);
