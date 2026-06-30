@@ -227,16 +227,17 @@ const msg = 'from the heart';`;
         assert.ok(specs.length === 0 || specs[0] !== undefined);
     });
 
-    test('very long single-line document does not hang', () => {
+    test('very long single-line document completes quickly', () => {
         const line = `import { X } from './module'; `;
-        // Repeat 10000 times — should complete quickly
         const text = line.repeat(10000);
         const start = Date.now();
         const specs = extractRelativeImportSpecifiers(text, 'typescript');
         const elapsed = Date.now() - start;
-        assert.ok(elapsed < 5000, `extraction took ${elapsed}ms — possible perf issue`);
+        // Pure function should handle 10k lines in well under 1s.
+        // (VS Code test startup overhead is not included in this measurement)
+        console.log(`  [perf] 10000 lines scanned in ${elapsed}ms (${(elapsed / 10000).toFixed(4)}ms/line)`);
+        assert.ok(elapsed < 1000, `extraction took ${elapsed}ms — expected <1000ms for 10k lines`);
         assert.ok(specs.length > 0);
-        // Should contain ./module (deduplicated) and not crash
         assert.ok(specs.includes('./module'));
     }).timeout(10000);
 });

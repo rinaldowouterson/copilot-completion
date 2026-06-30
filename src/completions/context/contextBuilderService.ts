@@ -290,153 +290,135 @@ export class ContextBuilderService implements IContextBuilderService {
 export function extractRelativeImportSpecifiers(text: string, languageId: string): string[] {
     const specifiers: string[] = [];
     const seen = new Set<string>();
-    let i = 0;
+    const patterns = buildPatternsForLanguage(languageId);
+    if (patterns.length === 0) return [];
 
-    while (i < text.length) {
-        const scanResult = scanNextImportPattern(text, i, languageId);
-        if (!scanResult) break;
+    // Single pass: scan line by line. For each line, check if it contains any
+    // import keyword. This avoids O(n²) from calling indexOf() N times over
+    // the full remaining text.
+    const lines = text.split('\n');
+    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        const line = lines[lineIdx];
+        if (!line) continue;
 
-        const { nextIndex, specifier, isQuotedInclude } = scanResult;
-        if (specifier && !seen.has(specifier)) {
-            // Accept: ./path, ../path, . (Python), .module (Python), or #include "..." (always relative)
-            const isRelativePath = specifier.startsWith('./') || specifier.startsWith('../');
-            const isRelativePython = languageId === 'python' && specifier.startsWith('.');
-            if (isRelativePath || isRelativePython || isQuotedInclude) {
-                seen.add(specifier);
-                specifiers.push(specifier);
+        // Check each pattern keyword against this line
+        for (const [keyword, advance] of patterns) {
+            const kwIdx = line.indexOf(keyword);
+            if (kwIdx < 0) continue;
+
+            const result = extractSpecifierFromMatch(line, keyword, advance, kwIdx, languageId);
+            if (!result) continue;
+
+            const { specifier, isQuotedInclude } = result;
+            if (specifier && !seen.has(specifier)) {
+                const isRelativePath = specifier.startsWith('./') || specifier.startsWith('../');
+                const isRelativePython = languageId === 'python' && specifier.startsWith('.');
+                if (isRelativePath || isRelativePython || isQuotedInclude) {
+                    seen.add(specifier);
+                    specifiers.push(specifier);
+                }
             }
+            // Found a keyword on this line — no need to check other patterns
+            break;
         }
-        i = nextIndex;
     }
 
     return specifiers;
 }
 
-interface ScanResult {
-    nextIndex: number;
-    specifier: string | undefined;
-    /** Only `#include "..."` and similar quotes-include patterns: always relative. */
-    isQuotedInclude: boolean;
+/**
+ * Extract the import specifier from a line that matched an import keyword.
+ * Returns undefined if the specifier is malformed or missing.
+ */
+function extractSpecifierFromMatch(
+    line: string,
+    keyword: string,
+    advance: number,
+    kwIdx: number,
+    languageId: string,
+): { specifier: string; isQuotedInclude: boolean } | undefined {
+    const afterKeyword = kwIdx + advance;
+
+    // Python 'from . import X': specifier is a dot-prefixed module path (no quotes)
+    if (languageId === 'python' && keyword === 'from ') {
+        let specStart = afterKeyword;
+        while (specStart < line.length && (line[specStart] === ' ' || line[specStart] === '\t')) specStart++;
+        if (specStart >= line.length || line[specStart] !== '.') return undefined;
+        let specEnd = specStart;
+        while (specEnd < line.length && /[\w.]/.test(line[specEnd])) specEnd++;
+        const specifier = line.slice(specStart, specEnd);
+        if (!specifier) return undefined;
+        return { specifier, isQuotedInclude: false };
+    }
+
+    // Keywords ending with quote: require "...", import "...", #include "..."
+    if (keyword.endsWith('"') || keyword.endsWith("'")) {
+        const quoteChar = keyword[keyword.length - 1];
+        const specStart = afterKeyword;
+        const specEnd = line.indexOf(quoteChar, specStart);
+        if (specEnd <= specStart) return undefined;
+        const specifier = line.slice(specStart, specEnd);
+        return { specifier, isQuotedInclude: keyword === '#include "' };
+    }
+
+    // Non-Python 'from': from '...' import X
+    if (keyword === 'from ') {
+        const quote = findQuote(line, afterKeyword);
+        if (!quote) return undefined;
+        const specStart = quote.idx + 1;
+        const specEnd = line.indexOf(quote.char, specStart);
+        if (specEnd <= specStart) return undefined;
+        return { specifier: line.slice(specStart, specEnd), isQuotedInclude: false };
+    }
+
+    // Keywords ending with '(': require('...'), import('...')
+    if (keyword.endsWith('(')) {
+        const quote = findQuote(line, afterKeyword);
+        if (!quote) return undefined;
+        const specStart = quote.idx + 1;
+        const specEnd = line.indexOf(quote.char, specStart);
+        if (specEnd <= specStart) return undefined;
+        return { specifier: line.slice(specStart, specEnd), isQuotedInclude: false };
+    }
+
+    // General case: keyword followed by whitespace then a quoted string
+    const quote = findQuote(line, afterKeyword);
+    if (!quote) return undefined;
+    const specStart = quote.idx + 1;
+    const specEnd = line.indexOf(quote.char, specStart);
+    if (specEnd <= specStart) return undefined;
+    return { specifier: line.slice(specStart, specEnd), isQuotedInclude: false };
 }
 
-/**
- * Scan for the next import-like pattern starting from position `i`.
- * Language-aware: checks different keywords depending on languageId.
- */
-function scanNextImportPattern(text: string, i: number, languageId: string): ScanResult | undefined {
-    // Pattern table: [keyword, advancePastKeyword, handler] for each language family
-    type Pattern = [keyword: string, advance: number];
-    const patterns: Pattern[] = [];
-
+/** Build the pattern table once (per language), not every iteration. */
+function buildPatternsForLanguage(languageId: string): [keyword: string, advance: number][] {
+    const patterns: [string, number][] = [];
     if (languageId.startsWith('typescript') || languageId.startsWith('javascript')) {
-        patterns.push(['from ', 5]);
-        patterns.push(['require(', 8]);
-        patterns.push(['require.resolve(', 17]);
-        patterns.push(['import(', 7]);
+        patterns.push(['from ', 5], ['require(', 8], ['require.resolve(', 17], ['import(', 7]);
     }
     if (['ruby'].includes(languageId)) {
-        patterns.push(['require "', 9]);
-        patterns.push(["require '", 9]);
-        patterns.push(['require_relative "', 18]);
-        patterns.push(["require_relative '", 18]);
+        patterns.push(['require "', 9], ["require '", 9], ['require_relative "', 18], ["require_relative '", 18]);
     }
     if (['python'].includes(languageId)) {
         patterns.push(['from ', 5]);
     }
     if (['go', 'dart'].includes(languageId)) {
-        patterns.push(['import "', 8]);
-        patterns.push(["import '", 8]);
+        patterns.push(['import "', 8], ["import '", 8]);
     }
     if (['php'].includes(languageId)) {
-        patterns.push(['require "', 9]);
-        patterns.push(["require '", 9]);
-        patterns.push(['include "', 9]);
-        patterns.push(["include '", 9]);
-        patterns.push(['require_once "', 14]);
-        patterns.push(["require_once '", 14]);
-        patterns.push(['include_once "', 14]);
-        patterns.push(["include_once '", 14]);
+        patterns.push(['require "', 9], ["require '", 9], ['include "', 9], ["include '", 9],
+            ['require_once "', 14], ["require_once '", 14], ['include_once "', 14], ["include_once '", 14]);
     }
-    if (['c', 'cpp', 'csharp'].includes(languageId)) {
+    if (['c', 'cpp'].includes(languageId)) {
         patterns.push(['#include "', 10]);
     }
     if (['lua'].includes(languageId)) {
-        patterns.push(['require "', 9]);
-        patterns.push(["require '", 9]);
+        patterns.push(['require "', 9], ["require '", 9]);
     }
-
-    // Find the earliest match across all patterns
-    let earliestIdx = -1;
-    let earliestPattern: Pattern | undefined;
-    for (const pattern of patterns) {
-        const idx = text.indexOf(pattern[0], i);
-        if (idx >= 0 && (earliestIdx < 0 || idx < earliestIdx)) {
-            earliestIdx = idx;
-            earliestPattern = pattern;
-        }
-    }
-    if (!earliestPattern) return undefined;
-
-    const [keyword, advance] = earliestPattern;
-
-    // Python 'from . import X': specifier is dot-prefixed module path (no quotes)
-    if (languageId === 'python' && keyword === 'from ') {
-        const afterFrom = earliestIdx + advance;
-        let specStart = afterFrom;
-        while (specStart < text.length && (text[specStart] === ' ' || text[specStart] === '\t')) specStart++;
-        if (specStart >= text.length) return undefined;
-        if (text[specStart] !== '.') return undefined; // skip absolute/non-relative
-        let specEnd = specStart;
-        while (specEnd < text.length && /[\w.]/.test(text[specEnd])) specEnd++;
-        const specifier = text.slice(specStart, specEnd);
-        if (specifier) return { nextIndex: specEnd, specifier, isQuotedInclude: false };
-        return undefined;
-    }
-
-    // For keywords that already include the opening quote (require ", import ", #include ")
-    if (keyword.endsWith('"') || keyword.endsWith("'")) {
-        const quoteChar = keyword[keyword.length - 1];
-        const specStart = earliestIdx + advance;
-        const specEnd = text.indexOf(quoteChar, specStart);
-        if (specEnd <= specStart) return undefined;
-        const specifier = text.slice(specStart, specEnd);
-        const isQuotedInclude = keyword === '#include "';
-        return { nextIndex: specEnd + 1, specifier, isQuotedInclude };
-    }
-
-    // For 'from' (non-Python): from '...' import X
-    if (keyword === 'from ') {
-        const startQuote = findQuote(text, earliestIdx + advance);
-        if (!startQuote) return undefined;
-        const specStart = startQuote.idx + 1;
-        const specEnd = text.indexOf(startQuote.char, specStart);
-        if (specEnd <= specStart) return undefined;
-        const specifier = text.slice(specStart, specEnd);
-        return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
-    }
-
-    // For keywords ending with '(' (require(), import()), find the quoted arg
-    if (keyword.endsWith('(')) {
-        const startQuote = findQuote(text, earliestIdx + advance);
-        if (!startQuote) return undefined;
-        const specStart = startQuote.idx + 1;
-        const specEnd = text.indexOf(startQuote.char, specStart);
-        if (specEnd <= specStart) return undefined;
-        const specifier = text.slice(specStart, specEnd);
-        return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
-    }
-
-    // General case: keyword followed by whitespace then a quoted string
-    const startQuote = findQuote(text, earliestIdx + advance);
-    if (!startQuote) return undefined;
-    const specStart = startQuote.idx + 1;
-    const specEnd = text.indexOf(startQuote.char, specStart);
-    if (specEnd <= specStart) return undefined;
-    const specifier = text.slice(specStart, specEnd);
-    return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
+    return patterns;
 }
 
-/** Find the next single or double quote in text starting from `pos`. */
+/** Find the next single or double quote in `text` starting from `pos`. */
 function findQuote(text: string, pos: number): { char: string; idx: number } | undefined {
     for (let j = pos; j < text.length; j++) {
         if (text[j] === '\'') return { char: '\'', idx: j };
