@@ -34,6 +34,8 @@ export interface INesConfigProvider {
     get presencePenalty(): number;
     get frequencyPenalty(): number;
     get stream(): boolean;
+    get debounceTimeout(): number;
+    get responseTimeout(): number;
     get contextScoping(): 'basic' | 'lsp';
     get nextCursorPredictionEnabled(): boolean;
     set nextCursorPredictionEnabled(value: boolean);
@@ -159,6 +161,14 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
 
     get stream(): boolean {
         return this._cached<boolean>(ConfigKeys.Nes.stream, true);
+    }
+
+    get debounceTimeout(): number {
+        return this._cached<number>(ConfigKeys.Nes.debounceTimeout, 150);
+    }
+
+    get responseTimeout(): number {
+        return this._cached<number>(ConfigKeys.Nes.responseTimeout, 1000);
     }
 
     get contextScoping(): 'basic' | 'lsp' {

@@ -15,10 +15,7 @@ import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';
 import { IMultilineStrategy } from './multiline/types';
 import { MultilineContextBuilder } from './multiline/MultilineContextBuilder';
 import { IContextBuilderService } from '../context/contextBuilderService';
-
-// Module-level debounce: reset on each cancellation (user keystroke), fire after silence
-let lastCancelledTime = 0;
-let lastTimeoutId: ReturnType<typeof setTimeout> | null = null;
+import { notifyCancelled, waitForDebounce, getLastCancelledTime } from '../../common/requestDebounce';
 
 export interface GhostTextResult {
     completions: GhostCompletion[];
@@ -218,7 +215,7 @@ export class GhostTextComputer {
         const abortController = new AbortController();
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         const cancelListener = token?.onCancellationRequested(() => {
-            lastCancelledTime = Date.now();
+            notifyCancelled();
             this._log.info(`[GHOST] CANCELLED — user typed, abort in ${this._config.responseTimeout}ms`);
             if (cancelTimer) clearTimeout(cancelTimer);
             cancelTimer = setTimeout(() => {
@@ -232,33 +229,13 @@ export class GhostTextComputer {
             }, this._config.responseTimeout);
         });
 
-        // Debounce: wait for silence after the last keystroke before firing.
-        // Skip the wait on the first character of a burst (no recent cancellation).
-        // On cancellation, the timer self-corrects via recursive checkElapsed.
-        const debounceMs = this._config.debounceTimeout;
-        const sinceLastCancel = Date.now() - lastCancelledTime;
-        const isFreshBurst = lastCancelledTime === 0 || sinceLastCancel >= debounceMs * 2;
-        if (debounceMs > 0 && !isFreshBurst) {
-            await new Promise<void>((resolve, reject) => {
-                const checkElapsed = () => {
-                    if (abortController.signal.aborted) {
-                        const err = new Error('Aborted');
-                        err.name = 'AbortError';
-                        reject(err);
-                        return;
-                    }
-                    const elapsed = Date.now() - lastCancelledTime;
-                    if (elapsed >= debounceMs) {
-                        resolve();
-                    } else {
-                        if (lastTimeoutId) clearTimeout(lastTimeoutId);
-                        lastTimeoutId = setTimeout(checkElapsed, debounceMs - elapsed);
-                    }
-                };
-                checkElapsed();
-            });
+        // Debounce (shared timer with NES).
+        const sinceLastCancel = Date.now() - getLastCancelledTime();
+        const isFreshBurst = getLastCancelledTime() === 0 || sinceLastCancel >= this._config.debounceTimeout * 2;
+        if (!isFreshBurst) {
+            await waitForDebounce(this._config.debounceTimeout, abortController.signal);
         }
-        this._log.debug(`[GHOST] debounce fresh_burst=${isFreshBurst} waited=${debounceMs}ms`);
+        this._log.debug(`[GHOST] debounce fresh_burst=${isFreshBurst} timeout=${this._config.debounceTimeout}ms`);
 
         const adapter = this._llmManager.getAdapter('completions');
         const ourRequestId = `ghost-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

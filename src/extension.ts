@@ -73,7 +73,7 @@ export function activate(context: vscode.ExtensionContext) {
     builder.define(INesProvider, new SyncDescriptor(NextEditProvider));
 
     // === Context (shared between GHOST and NES) ===
-    builder.define(IContextBuilderService, new ContextBuilderService());
+    builder.define(IContextBuilderService, new SyncDescriptor(ContextBuilderService));
 
     // === UI ===
     builder.define(IStatusBarPanel, new SyncDescriptor(StatusBarPanel));

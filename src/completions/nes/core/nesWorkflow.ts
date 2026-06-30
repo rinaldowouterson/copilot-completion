@@ -15,10 +15,7 @@ import { EditFilterChain } from '../response/editFilterChain';
 import { NesHistoryTracker } from './nesHistoryTracker';
 import { IContextBuilderService } from '../../context/contextBuilderService';
 import { Deferred } from '../../../common/async';
-
-// Module-level rate limiting (matches original fetch.ts design)
-let lastRequestTime = 0;
-let lastTimeoutId: ReturnType<typeof setTimeout> | null = null;
+import { notifyCancelled, waitForDebounce } from '../../../common/requestDebounce';
 
 export interface NesExecutionResult {
     editResult: NextEditResult | undefined;
@@ -189,7 +186,8 @@ export class NesWorkflow {
         this._pendingRequest = pendingRequest;
         let cancelTimer: ReturnType<typeof setTimeout> | undefined;
         const cancelListener = token?.onCancellationRequested(() => {
-            this._log.info(`[NES]  ABORT — CancellationToken triggered (1000ms delay)`);
+            notifyCancelled();
+            this._log.info(`[NES]  CANCELLED — user typed, abort in ${this._config.responseTimeout}ms`);
             if (cancelTimer) clearTimeout(cancelTimer);
             cancelTimer = setTimeout(() => {
                 if (abortController.signal.aborted) return;
@@ -197,32 +195,17 @@ export class NesWorkflow {
                     this._log.info(`[NES]  ABORT — skipped (${pendingRequest.liveDependants} dependants)`);
                     return;
                 }
-                this._log.info(`[NES]  ABORT — executing after 1000ms delay`);
+                this._log.info(`[NES]  ABORT — executing after ${this._config.responseTimeout}ms delay`);
                 abortController.abort();
-            }, 1000);
+            }, this._config.responseTimeout);
         });
 
-        // Rate limiting: enforce minimum interval between requests
-        const delayMs = 100;
-        const waitTime = Math.max(0, delayMs - (Date.now() - lastRequestTime));
-        if (waitTime > 0) {
-            this._log.debug(`[GHOST] rate_limiting delay=${waitTime}ms`);
-            await new Promise<void>((resolve, reject) => {
-                const tid = setTimeout(() => {
-                    if (abortController.signal.aborted) {
-                        const err = new Error('Aborted');
-                        err.name = 'AbortError';
-                        reject(err);
-                        return;
-                    }
-                    lastRequestTime = Date.now();
-                    resolve();
-                }, waitTime);
-                if (lastTimeoutId) clearTimeout(lastTimeoutId);
-                lastTimeoutId = tid;
-            });
-        } else {
-            lastRequestTime = Date.now();
+        // Debounce (shared timer with GHOST).
+        // Skip the wait on the first call (timer starts fresh).
+        const ok = await waitForDebounce(this._config.debounceTimeout, abortController.signal);
+        if (!ok) {
+            this._log.info(`[NES]  SKIP — debounce aborted`);
+            return { editResult: undefined };
         }
 
         this._log.debug(`[NES]  endpoint=${endpoint} model=${this._config.model} max_tokens=${this._config.maxOutputTokens}`);

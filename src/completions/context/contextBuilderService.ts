@@ -4,6 +4,7 @@ import { ServiceIdentifier } from '../../di/instantiation';
 import { ContextBundle, FileExport, EnclosingScope } from '../../common/contextBundle';
 import { getSyntax, findStatementEnd } from '../../common/languageSyntax';
 import { LRUCacheMap } from '../../common/lruCacheMap';
+import { ILogService } from '../shared/log/logService';
 
 export const IContextBuilderService: ServiceIdentifier<IContextBuilderService> =
     createServiceIdentifier<IContextBuilderService>('IContextBuilderService');
@@ -66,7 +67,9 @@ export class ContextBuilderService implements IContextBuilderService {
     private readonly _workspaceCache = new Map<string, SimpleSymbol[]>();
     private _workspaceSeeded = false;
 
-    constructor() {
+    constructor(
+        @ILogService private readonly _log: ILogService,
+    ) {
         // Invalidate per-file cache when text changes (next gather re-fetches fresh data).
         vscode.workspace.onDidChangeTextDocument(e => {
             this._cache.delete(e.document.uri.toString());
@@ -127,7 +130,7 @@ export class ContextBuilderService implements IContextBuilderService {
                 : 'no_enclosing_scope';
             const exportCount = fileExports.length;
             const wsFiles = this._workspaceCache.size;
-            console.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}`);
+            this._log.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}`);
         }
 
         return {

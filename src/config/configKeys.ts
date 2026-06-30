@@ -33,6 +33,8 @@ export const ConfigKeys = {
         presencePenalty: 'cc-completion.nes.presencePenalty',
         frequencyPenalty: 'cc-completion.nes.frequencyPenalty',
         stream: 'cc-completion.nes.stream',
+        debounceTimeout: 'cc-completion.nes.capabilities.limits.debounceTimeout',
+        responseTimeout: 'cc-completion.nes.capabilities.limits.responseTimeout',
         contextScoping: 'cc-completion.nes.contextScoping',
         nextCursorPredictionEnabled: 'cc-completion.nes.nextCursorPrediction.enabled',
         mimicGhostTextBehavior: 'cc-completion.nes.mimicGhostTextBehavior',

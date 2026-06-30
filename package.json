@@ -214,6 +214,18 @@
           "default": 128000,
           "description": "Max context window tokens"
         },
+        "cc-completion.nes.capabilities.limits.debounceTimeout": {
+          "type": "number",
+          "default": 150,
+          "minimum": 0,
+          "description": "Debounce delay (ms) before firing a NES request. Shared with GHOST — user typing in either pipeline resets the same timer."
+        },
+        "cc-completion.nes.capabilities.limits.responseTimeout": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 100,
+          "description": "Maximum time (ms) to wait for a NES response before aborting the request."
+        },
         "cc-completion.nes.capabilities.supports.thinking": {
           "type": "boolean",
           "default": false,
