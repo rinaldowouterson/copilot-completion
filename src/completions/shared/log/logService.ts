@@ -19,18 +19,28 @@ export interface ILogService {
 export class LogService implements ILogService {
     readonly _serviceBrand: undefined;
     private _channel: vscode.OutputChannel;
-    /** Toggle — logging is off by default. Enable via command palette. */
     private _enabled = false;
+    private readonly _configKey = 'cc-completion.logging.enabled';
+    private _configListener: vscode.Disposable | undefined;
 
     constructor() {
         this._channel = vscode.window.createOutputChannel('CC Completion');
+        this._enabled = vscode.workspace.getConfiguration().get<boolean>(this._configKey, false);
+        // Watch for setting changes (e.g. via quick pick or settings.json edit)
+        this._configListener = vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration(this._configKey)) {
+                this._enabled = vscode.workspace.getConfiguration().get<boolean>(this._configKey, false);
+            }
+        });
     }
 
     get enabled(): boolean { return this._enabled; }
     set enabled(value: boolean) {
+        // Persist to VS Code settings (survives reloads)
+        vscode.workspace.getConfiguration().update(this._configKey, value, true);
         this._enabled = value;
         if (value) {
-            this._channel.show(true);  // reveal the channel when enabling
+            this._channel.show(true);
             this._channel.appendLine('[CC Completion] Logging enabled');
         } else {
             this._channel.appendLine('[CC Completion] Logging disabled');
@@ -46,7 +56,7 @@ export class LogService implements ILogService {
         this._channel.appendLine(`[warn] ${message}`);
     }
     error(message: string): void {
-        // Errors are always logged (they're actionable even when debugging is off)
+        if (!this._enabled) return;
         this._channel.appendLine(`[error] ${message}`);
     }
     debug(message: string): void {
@@ -60,5 +70,9 @@ export class LogService implements ILogService {
         if (this._enabled) {
             this._channel.appendLine('[CC Completion] ===== session start =====');
         }
+    }
+
+    dispose(): void {
+        this._configListener?.dispose();
     }
 }

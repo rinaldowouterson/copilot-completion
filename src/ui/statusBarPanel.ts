@@ -38,6 +38,8 @@ export class StatusBarPanel implements IStatusBarPanel {
 
         const ghostChange = this._ghostConfig.onDidChangeEnabled(() => this._updateStatusBar());
         const nesChange = this._nesConfig.onDidChangeEnabled(() => this._updateStatusBar());
+        // Logging enabled state is read from the setting directly by LogService;
+        // no need for a separate listener here. The quick pick writes to the setting.
 
         return {
             dispose: () => {
@@ -53,13 +55,15 @@ export class StatusBarPanel implements IStatusBarPanel {
         const ghostOn = this._ghostConfig.enabled;
         const nesOn = this._nesConfig.enabled;
         const ncpOn = this._nesConfig.nextCursorPredictionEnabled;
-        const active = [ghostOn && 'G', nesOn && 'N', ncpOn && 'C'].filter(Boolean).join('/');
+        const logOn = this._log.enabled;
+        const active = [ghostOn && 'G', nesOn && 'N', ncpOn && 'C', logOn && 'L'].filter(Boolean).join('/');
         if (active) {
             this._statusBarItem.text = `$(sparkle) CC [${active}]`;
             this._statusBarItem.tooltip = [
                 ` ${ghostOn ? '✅' : '❌'} Ghost Inline Suggetion `,
                 ` ${nesOn ? '✅' : '❌'} Next Edit Suggestion `,
                 ` ${ncpOn ? '✅' : '❌'} Next Cursor Prediction `,
+                ` ${logOn ? '✅' : '❌'} Output Logging `,
             ].join('\n');
         } else {
             this._statusBarItem.text = `$(circle-slash) CC [OFF]`;
@@ -71,6 +75,7 @@ export class StatusBarPanel implements IStatusBarPanel {
         const ghostOn = this._ghostConfig.enabled;
         const nesOn = this._nesConfig.enabled;
         const ncpOn = this._nesConfig.nextCursorPredictionEnabled;
+        const logOn = this._log.enabled;
 
         const ghostItem: vscode.QuickPickItem = { label: 'Ghost Inline Completion (GHOST)', picked: ghostOn };
         const nesItem: vscode.QuickPickItem = { label: 'Next Edit Suggestion (NES)', picked: nesOn };
@@ -79,12 +84,17 @@ export class StatusBarPanel implements IStatusBarPanel {
             description: nesOn ? 'Requires NES enabled' : 'Disabled (requires NES)',
             picked: ncpOn && nesOn,
         };
+        const logItem: vscode.QuickPickItem = {
+            label: 'Output Logging (LOG)',
+            description: 'Log GHOST/NES activity to CC Completion output channel',
+            picked: logOn,
+        };
 
         const picks = await vscode.window.showQuickPick(
-            [ghostItem, nesItem, ncpItem],
+            [ghostItem, nesItem, ncpItem, logItem],
             {
                 canPickMany: true,
-                placeHolder: 'Toggle GHOST / NES / NCP completion features',
+                placeHolder: 'Toggle GHOST / NES / NCP / LOG features',
                 title: 'CC Completion',
             },
         );
@@ -94,23 +104,20 @@ export class StatusBarPanel implements IStatusBarPanel {
         const pickedSet = new Set(picks);
         const newGhost = pickedSet.has(ghostItem);
         const newNes = pickedSet.has(nesItem);
-        // NCP only active when NES is also picked
         const newNcp = newNes && pickedSet.has(ncpItem);
+        const newLog = pickedSet.has(logItem);
 
         if (newGhost !== ghostOn) {
             this._ghostConfig.enabled = newGhost;
-            this._log.info(`GHOST: ${newGhost ? 'enabled' : 'disabled'}`);
         }
         if (newNes !== nesOn) {
             this._nesConfig.enabled = newNes;
-            this._log.info(`NES: ${newNes ? 'enabled' : 'disabled'}`);
         }
         if (newNes && newNcp !== ncpOn) {
             this._nesConfig.nextCursorPredictionEnabled = newNcp;
-            this._log.info(`NCP: ${newNcp ? 'enabled' : 'disabled'}`);
         }
-        if (!newNes && nesOn) {
-            this._log.info(`NCP: disabled (NES turned off)`);
+        if (newLog !== logOn) {
+            this._log.enabled = newLog;
         }
 
         this._updateStatusBar();

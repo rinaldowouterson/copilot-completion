@@ -106,6 +106,9 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
+    // Dispose LogService on deactivation (clean up config listener)
+    context.subscriptions.push(logService);
+
     // Register LLM adapters
     registerLLMAdapters(instantiationService, ghostConfig, nesConfig, logService);
 
