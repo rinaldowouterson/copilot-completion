@@ -200,12 +200,13 @@ export class ContextBuilderService implements IContextBuilderService {
     /**
      * Resolve relative import statements to their target files using file-system lookups.
      *
-     * Extracts import specifiers from the source text (e.g. `'./Button'`, `'../utils'`),
-     * resolves them relative to the source file's directory, tries common extensions,
-     * and fetches each target's exported symbols via the per-file LRU cache.
+     * Extracts import specifiers from the source text (e.g. `'./Button'`, `'../utils'`,
+     * `from .module import X`, `#include "header.h"`), resolves them relative to the
+     * source file's directory, tries language-appropriate extensions, and fetches each
+     * target's exported symbols via the per-file LRU cache.
      *
-     * Only follows relative imports (`./` and `../`) — package imports (`react`, `lodash`)
-     * and absolute imports are skipped.
+     * Only follows relative imports — package imports (`react`, `lodash`) and
+     * build-system paths (`java.util.List`) are skipped.
      *
      * Limited to 5 unique targets to keep prompt size bounded.
      */
@@ -445,19 +446,24 @@ function findQuote(text: string, pos: number): { char: string; idx: number } | u
 }
 
 /**
- * Resolve a relative import specifier to a file URI, trying common extensions.
+ * Resolve a relative import specifier to a file URI, trying language-appropriate extensions.
  *
- * Order: .ts, .tsx, .js, .jsx, .mjs, .cjs, /index.ts, /index.js
+ * Candidate order:
+ *   1. specifier as-is (fast path for fully-specified paths like `#include "header.h"`)
+ *   2. specifier + each language extension (e.g. `./foo` → `./foo.ts`)
+ *   3. specifier + /index + extension (e.g. `./foo` → `./foo/index.ts`)
  */
 /** @internal Exported for unit testing only. */
 export async function resolveSpecifierToUri(specifier: string, sourceDir: string, scheme: string, languageId: string = 'typescript'): Promise<vscode.Uri | undefined> {
     const extensions = getExtensionsForLanguage(languageId);
     const indexVariants = extensions.map(e => `/index${e}`);
 
+    // Try as-is first (handles `#include "file.h"` where extension is already present)
+    // Then try +extension, then +/index+extension
     const candidates = [
+        specifier,
         ...extensions.map(ext => specifier + ext),
         ...indexVariants.map(idx => specifier + idx),
-        specifier, // also try as-is (might be a directory with its own resolution)
     ];
 
     for (const candidate of candidates) {
@@ -499,8 +505,7 @@ function getExtensionsForLanguage(languageId: string): string[] {
             return ['.php'];
         case 'c':
         case 'cpp':
-        case 'csharp':
-            return ['.h', '.hpp', '.c', '.cpp', '.cs'];
+            return ['.h', '.hpp', '.c', '.cpp'];
         case 'rust':
             // Rust uses :: paths resolved by the build system, not filesystem lookups
             return ['.rs'];
