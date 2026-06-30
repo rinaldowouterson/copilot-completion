@@ -233,7 +233,11 @@ export class GhostTextComputer {
         const sinceLastCancel = Date.now() - getLastCancelledTime();
         const isFreshBurst = getLastCancelledTime() === 0 || sinceLastCancel >= this._config.debounceTimeout * 2;
         if (!isFreshBurst) {
-            await waitForDebounce(this._config.debounceTimeout, abortController.signal);
+            const ok = await waitForDebounce(this._config.debounceTimeout, abortController.signal);
+            if (!ok) {
+                this._log.info(`[GHOST] SKIP — debounce aborted`);
+                return undefined;
+            }
         }
         this._log.debug(`[GHOST] debounce fresh_burst=${isFreshBurst} timeout=${this._config.debounceTimeout}ms`);
 
