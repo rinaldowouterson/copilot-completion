@@ -455,6 +455,9 @@ function findQuote(text: string, pos: number): { char: string; idx: number } | u
  */
 /** @internal Exported for unit testing only. */
 export async function resolveSpecifierToUri(specifier: string, sourceDir: string, scheme: string, languageId: string = 'typescript'): Promise<vscode.Uri | undefined> {
+    // Reject empty specifier or bare `.` / `..` (Python package-relative refs we can't resolve)
+    if (!specifier || specifier === '.' || specifier === '..') return undefined;
+
     const extensions = getExtensionsForLanguage(languageId);
     const indexVariants = extensions.map(e => `/index${e}`);
 

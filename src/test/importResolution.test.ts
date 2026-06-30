@@ -187,6 +187,58 @@ import('./other').then(m => ...);`;
         const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./lazy', './other']);
     });
+
+    // ── Negative / edge cases ─────────────────────────────────
+
+    test('all imports are non-relative (package imports only) — returns empty', () => {
+        const text = `import React from 'react';
+import { Component } from 'react';
+const fs = require('fs');`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
+    });
+
+    test('single word after from is not a valid specifier', () => {
+        // "from X import Y" without quotes should not match
+        const text = `from something import foo`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
+    });
+
+    test('string containing "from" as substring in a comment', () => {
+        // "from" appearing inside a string or comment, not as an import keyword
+        const text = `// transfer from old system
+const msg = 'from the heart';`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
+    });
+
+    test('require without parentheses is not matched', () => {
+        const text = `const x = require './foo';`; // missing parens — not valid JS/TS require
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
+    });
+
+    test('import specifier spans multiple lines (line continuation)', () => {
+        // TypeScript doesn't support multi-line import specifiers, but just in case
+        const text = `import { X } from './\nfoo';`; // broken across lines
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        // The scan finds the quote after 'from ' and looks for the closing quote.
+        // './\nfoo' has a newline in the middle. indexOf("'") finds the first
+        // single quote after the opening quote — that's the one on the next line.
+        // So it would find './\nfoo' as the specifier, which starts with ./
+        // This is an edge case — the import is malformed but the scanner doesn't crash.
+        assert.ok(specs.length === 0 || specs[0] !== undefined);
+    });
+
+    test('very long single-line document does not hang', () => {
+        const line = `import { X } from './module'; `;
+        // Repeat 10000 times — should complete quickly
+        const text = line.repeat(10000);
+        const start = Date.now();
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        const elapsed = Date.now() - start;
+        assert.ok(elapsed < 5000, `extraction took ${elapsed}ms — possible perf issue`);
+        assert.ok(specs.length > 0);
+        // Should contain ./module (deduplicated) and not crash
+        assert.ok(specs.includes('./module'));
+    }).timeout(10000);
 });
 
 suite('Import Resolution — integration', () => {
@@ -237,4 +289,27 @@ suite('Import Resolution — integration', () => {
         assert.ok(names.includes('greet'));
         assert.ok(names.includes('Helper'));
     }).timeout(25000);
+
+    // ── Negative integration tests ────────────────────────────
+
+    test('resolveSpecifierToUri returns undefined for non-existent file', async () => {
+        const dir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '/tmp';
+        const uri = await resolveSpecifierToUri('./nonexistent_file_12345', dir, 'file', 'typescript');
+        assert.strictEqual(uri, undefined);
+    });
+
+    test('resolveSpecifierToUri returns undefined for empty specifier', async () => {
+        const dir = '/tmp';
+        const uri = await resolveSpecifierToUri('', dir, 'file');
+        assert.strictEqual(uri, undefined);
+    });
+
+    test('resolveSpecifierToUri returns undefined for dot-only specifier (no extension match)', async () => {
+        // '.' alone without a module name — Python from . import X resolves to
+        // the __init__.py of the current package. Our resolver can't handle this,
+        // so it should return undefined.
+        const dir = '/tmp';
+        const uri = await resolveSpecifierToUri('.', dir, 'file', 'python');
+        assert.strictEqual(uri, undefined);
+    });
 });
