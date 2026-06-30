@@ -6,19 +6,19 @@
   "engines": {
     "vscode": "^1.110.0"
   },
-	"buildType": "dev",
-	"publisher": "young-triangle",
-	"homepage": "https://github.com/spite-triangle/copilot-completion",
-	"license": "SEE LICENSE IN LICENSE.txt",
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/spite-triangle/copilot-completion.git"
-	},
+  "buildType": "dev",
+  "publisher": "young-triangle",
+  "homepage": "https://github.com/spite-triangle/copilot-completion",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spite-triangle/copilot-completion.git"
+  },
   "categories": [
-		"AI",
-		"Programming Languages"
+    "AI",
+    "Programming Languages"
   ],
-  "keywords":[
+  "keywords": [
     "ai",
     "completion",
     "fim",
@@ -88,7 +88,7 @@
           "default": [],
           "description": "stop marks for response generation.",
           "items": {
-            "type":"string"
+            "type": "string"
           }
         },
         "cc-completion.ghost.promptTemplate": {
@@ -151,7 +151,10 @@
         },
         "cc-completion.ghost.contextScoping": {
           "type": "string",
-          "enum": ["basic", "lsp"],
+          "enum": [
+            "basic",
+            "lsp"
+          ],
           "default": "lsp",
           "description": "Context gathering mode for GHOST: 'basic' sends raw prefix/suffix; 'lsp' adds LSP scope info and file exports."
         },
@@ -164,13 +167,20 @@
         },
         "cc-completion.context.workspaceIndexMode": {
           "type": "string",
-          "enum": ["off", "opened-files", "workspace"],
+          "enum": [
+            "off",
+            "opened-files",
+            "workspace"
+          ],
           "default": "workspace",
           "description": "Symbol indexing scope: 'off' disables all LSP context; 'opened-files' queries only the file at cursor; 'workspace' (default) builds a full workspace symbol index for cross-file context."
         },
         "cc-completion.nes.contextScoping": {
           "type": "string",
-          "enum": ["basic", "lsp"],
+          "enum": [
+            "basic",
+            "lsp"
+          ],
           "default": "lsp",
           "description": "Context gathering mode for NES: 'basic' sends raw prompt; 'lsp' adds LSP scope info, file exports, and statement-end detection."
         },
@@ -300,16 +310,13 @@
     "@types/vscode": "^1.110.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
-    "copy-webpack-plugin": "^14.0.0",
     "eslint": "^9.39.3",
     "ts-loader": "^9.5.4",
     "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "webpack": "^5.105.3",
     "webpack-cli": "^6.0.1"
-  },
-  "dependencies": {
-    "web-tree-sitter": "^0.23.2"
   }
 }

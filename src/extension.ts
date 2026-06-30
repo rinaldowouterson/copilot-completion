@@ -24,8 +24,6 @@ import { CurrentGhostText, LastGhostText } from './completions/ghost/ghostTextSt
 import { IAsyncCompletionsManager, AsyncCompletionsManager } from './completions/ghost/asyncCompletions';
 import { IMultilineStrategy } from './completions/ghost/multiline/types';
 import { DefaultMultilineStrategy } from './completions/ghost/multiline/DefaultMultilineStrategy';
-import { setWasmDirPath } from './completions/ghost/multiline/treeSitter/fileLoader';
-
 // NES
 import { INesProvider, NextEditProvider } from './completions/nes/nextEditProvider';
 import { INextEditCache, NextEditCache } from './completions/nes/nextEditCache';
@@ -38,9 +36,6 @@ export function activate(context: vscode.ExtensionContext) {
     const logService = new LogService();
     logService.clear();
     logService.info('CC Completion activating...');
-
-    // Initialize WASM path for tree-sitter
-    setWasmDirPath(context.extensionUri.fsPath);
 
     // Build DI container
     const builder = new InstantiationServiceBuilder();

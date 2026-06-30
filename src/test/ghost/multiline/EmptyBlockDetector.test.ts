@@ -9,17 +9,17 @@ suite('EmptyBlockDetector', () => {
         assert.strictEqual(detector.name, 'EmptyBlock');
     });
 
-    test('defer when tree-sitter unavailable', async () => {
+    test('detects empty function body via heuristic', async () => {
         const ctx = createMockContext({
             lines: ['function foo() {', '    ', '}'],
             cursorLine: 1,
             cursorChar: 4,
         });
         const result = await detector.detect(ctx);
-        assert.strictEqual(result.decision, 'defer');
+        assert.strictEqual(result.decision, 'multiline');
     });
 
-    test('defer for inline mode', async () => {
+    test('defers for inline mode with parentheses', async () => {
         const ctx = createMockContext({
             lines: ['const x = (', '    ', ')'],
             cursorLine: 0,
@@ -30,7 +30,7 @@ suite('EmptyBlockDetector', () => {
         assert.strictEqual(result.decision, 'defer');
     });
 
-    test('defer for non-inline empty block start', async () => {
+    test('detects empty if-block via heuristic', async () => {
         const ctx = createMockContext({
             lines: ['if (true) {', '    ', '} else {'],
             cursorLine: 1,
@@ -38,6 +38,6 @@ suite('EmptyBlockDetector', () => {
             isMiddleOfTheLine: false,
         });
         const result = await detector.detect(ctx);
-        assert.strictEqual(result.decision, 'defer');
+        assert.strictEqual(result.decision, 'multiline');
     });
 });
