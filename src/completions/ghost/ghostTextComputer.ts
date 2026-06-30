@@ -14,6 +14,7 @@ import { DiagnosticSummary, GhostCompletion, ResultType } from './types';
 import { isInlineSuggestionFromTextAfterCursor } from './inlineSuggestion';
 import { IMultilineStrategy } from './multiline/types';
 import { MultilineContextBuilder } from './multiline/MultilineContextBuilder';
+import { IContextBuilderService } from '../context/contextBuilderService';
 
 // Module-level debounce: reset on each cancellation (user keystroke), fire after silence
 let lastCancelledTime = 0;
@@ -38,6 +39,7 @@ export class GhostTextComputer {
         @IAsyncCompletionsManager private readonly _asyncManager: IAsyncCompletionsManager,
         @ILogService private readonly _log: ILogService,
         @IMultilineStrategy private readonly multilineStrategy: IMultilineStrategy,
+        @IContextBuilderService private readonly _contextBuilder: IContextBuilderService,
     ) {}
 
     async getGhostText(
@@ -169,8 +171,11 @@ export class GhostTextComputer {
         const diagnostics = this._collectDiagnostics(document, position);
         this._log.debug(`[GHOST] diagnostics=${diagnostics.length} recentEdits=${this._recentEdits.recentEdits.length} [${Date.now() - t3}ms]`);
 
-        // Step 6: Build prompt
+        // Step 6: Build prompt (with optional LSP context bundle)
         const t4 = Date.now();
+        const contextBundle = this._config.contextScoping === 'lsp'
+            ? await this._contextBuilder.gather(document, position)
+            : undefined;
         let prompt = this._promptFactory.createPrompt({
             template: this._config.promptTemplate,
             prefix,
@@ -178,6 +183,7 @@ export class GhostTextComputer {
             languageId: document.languageId,
             diagnostics,
             recentEdits: this._recentEdits.recentEdits,
+            context: contextBundle,
         });
         prompt = prompt.replace(/\r\n/g, '\n');
         this._log.debug(`[GHOST] prompt=${prompt.length}ch model=${this._config.model} [${Date.now() - t4}ms]`);

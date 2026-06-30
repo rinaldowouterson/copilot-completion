@@ -30,6 +30,7 @@ export interface IGhostConfigProvider {
     get presencePenalty(): number;
     get frequencyPenalty(): number;
     get stream(): boolean;
+    get contextScoping(): 'basic' | 'lsp';
     onDidChangeEnabled(listener: () => void): vscode.Disposable;
 }
 
@@ -163,6 +164,10 @@ export class VSCodeGhostConfigProvider implements IGhostConfigProvider {
 
     get stream(): boolean {
         return this._cached<boolean>(ConfigKeys.Ghost.stream, true);
+    }
+
+    get contextScoping(): 'basic' | 'lsp' {
+        return this._cached<'basic' | 'lsp'>(ConfigKeys.Ghost.contextScoping, 'lsp');
     }
 
     onDidChangeEnabled(listener: () => void): vscode.Disposable {

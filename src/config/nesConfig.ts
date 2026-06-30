@@ -34,6 +34,7 @@ export interface INesConfigProvider {
     get presencePenalty(): number;
     get frequencyPenalty(): number;
     get stream(): boolean;
+    get contextScoping(): 'basic' | 'lsp';
     get nextCursorPredictionEnabled(): boolean;
     set nextCursorPredictionEnabled(value: boolean);
     get mimicGhostTextBehavior(): boolean;
@@ -158,6 +159,10 @@ export class VSCodeNesConfigProvider implements INesConfigProvider {
 
     get stream(): boolean {
         return this._cached<boolean>(ConfigKeys.Nes.stream, true);
+    }
+
+    get contextScoping(): 'basic' | 'lsp' {
+        return this._cached<'basic' | 'lsp'>(ConfigKeys.Nes.contextScoping, 'lsp');
     }
 
     get mimicGhostTextBehavior(): boolean {

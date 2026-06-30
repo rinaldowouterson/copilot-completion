@@ -144,6 +144,25 @@
           "default": true,
           "description": "Enable SSE streaming for GHOST completions"
         },
+        "cc-completion.ghost.contextScoping": {
+          "type": "string",
+          "enum": ["basic", "lsp"],
+          "default": "lsp",
+          "description": "Context gathering mode for GHOST: 'basic' sends raw prefix/suffix; 'lsp' adds LSP scope info and file exports."
+        },
+        "cc-completion.context.lspCacheMaxEntries": {
+          "type": "number",
+          "default": 100,
+          "minimum": 10,
+          "maximum": 500,
+          "description": "Max entries in the LSP symbol cache. Higher values cache more files at the cost of memory."
+        },
+        "cc-completion.nes.contextScoping": {
+          "type": "string",
+          "enum": ["basic", "lsp"],
+          "default": "lsp",
+          "description": "Context gathering mode for NES: 'basic' sends raw prompt; 'lsp' adds LSP scope info, file exports, and statement-end detection."
+        },
         "cc-completion.nes.baseUrl": {
           "type": "string",
           "default": "",

@@ -4,8 +4,10 @@ import { ServiceCollection } from './serviceCollection';
 import { InstantiationService } from './instantiationService';
 import { createDecorator } from './instantiation';
 import { CurrentGhostText, LastGhostText } from '../completions/ghost/ghostTextState';
+import { IContextBuilderService } from '../completions/context/contextBuilderService';
 
 export { ServiceIdentifier, SyncDescriptor, createDecorator as createServiceIdentifier };
+export { IContextBuilderService };
 
 export const ICurrentGhostText = createDecorator<CurrentGhostText>('ICurrentGhostText');
 export const ILastGhostText = createDecorator<LastGhostText>('ILastGhostText');

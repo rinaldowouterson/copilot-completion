@@ -1,5 +1,6 @@
 import { createServiceIdentifier } from '../../di/services';
 import { DiagnosticSummary } from './types';
+import { ContextBundle } from '../../common/contextBundle';
 
 export const IGhostPromptFactory = createServiceIdentifier<IGhostPromptFactory>('IGhostPromptFactory');
 
@@ -12,7 +13,19 @@ export interface IGhostPromptFactory {
         languageId: string;
         diagnostics: DiagnosticSummary[];
         recentEdits: string[];
+        context?: ContextBundle;
     }): string;
+}
+
+/** Shared helper used by both GHOST and NES to determine comment prefix per language. */
+export function getCommentPrefix(languageId: string): string {
+    const hashLanguages = new Set([
+        'python', 'ruby', 'shellscript', 'bash', 'yaml', 'toml', 'perl', 'r',
+    ]);
+    if (hashLanguages.has(languageId)) {
+        return '#';
+    }
+    return '//';
 }
 
 export class GhostPromptFactory implements IGhostPromptFactory {
@@ -25,11 +38,12 @@ export class GhostPromptFactory implements IGhostPromptFactory {
         languageId: string;
         diagnostics: DiagnosticSummary[];
         recentEdits: string[];
+        context?: ContextBundle;
     }): string {
         const contextLines: string[] = [];
+        const commentPrefix = getCommentPrefix(params.languageId);
 
         // Language ID
-        const commentPrefix = this._getCommentPrefix(params.languageId);
         contextLines.push(`${commentPrefix} language: ${params.languageId}`);
 
         // Diagnostics (cap at 5)
@@ -47,19 +61,21 @@ export class GhostPromptFactory implements IGhostPromptFactory {
             }
         }
 
+        // Context bundle: enclosing scope
+        if (params.context?.enclosingScope) {
+            const scope = params.context.enclosingScope;
+            contextLines.push(`${commentPrefix} scope: ${scope.kind} ${scope.name} (line ${scope.startLine}–${scope.endLine})`);
+        }
+
+        // Context bundle: file exports
+        if (params.context?.fileExports && params.context.fileExports.length > 0) {
+            const names = params.context.fileExports.map(e => `${e.name} (${e.kind})`).join(', ');
+            contextLines.push(`${commentPrefix} file exports: ${names}`);
+        }
+
         const context = contextLines.join('\n') + '\n';
         return params.template
             .replace(/\{prefix\}/g, '\n' + context + params.prefix)
             .replace(/\{suffix\}/g, '\n' + params.suffix + '\n');
-    }
-
-    private _getCommentPrefix(languageId: string): string {
-        const hashLanguages = new Set([
-            'python', 'ruby', 'shellscript', 'bash', 'yaml', 'toml', 'perl', 'r',
-        ]);
-        if (hashLanguages.has(languageId)) {
-            return '#';
-        }
-        return '//';
     }
 }

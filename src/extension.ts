@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { InstantiationServiceBuilder, SyncDescriptor, ICurrentGhostText, ILastGhostText } from './di/services';
+import { InstantiationServiceBuilder, SyncDescriptor, ICurrentGhostText, ILastGhostText, IContextBuilderService } from './di/services';
 import { IInstantiationService } from './di/instantiation';
 
 // Config
@@ -32,6 +32,7 @@ import { INextEditCache, NextEditCache } from './completions/nes/nextEditCache';
 
 // UI
 import { IStatusBarPanel, StatusBarPanel } from './ui/statusBarPanel';
+import { ContextBuilderService } from './completions/context/contextBuilderService';
 
 export function activate(context: vscode.ExtensionContext) {
     const logService = new LogService();
@@ -69,6 +70,9 @@ export function activate(context: vscode.ExtensionContext) {
     // === NES services ===
     builder.define(INextEditCache, new SyncDescriptor(NextEditCache));
     builder.define(INesProvider, new SyncDescriptor(NextEditProvider));
+
+    // === Context (shared between GHOST and NES) ===
+    builder.define(IContextBuilderService, new ContextBuilderService());
 
     // === UI ===
     builder.define(IStatusBarPanel, new SyncDescriptor(StatusBarPanel));

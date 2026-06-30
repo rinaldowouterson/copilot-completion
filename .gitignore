@@ -6,4 +6,5 @@ node_modules
 .traces/
 .claude/
 .superpowers
-docs/superpowers/
+docs/superpowers/nesha_autocomplete/
+nesha_autocomplete/

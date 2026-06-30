@@ -15,6 +15,7 @@ export const ConfigKeys = {
         presencePenalty: 'cc-completion.ghost.presencePenalty',
         frequencyPenalty: 'cc-completion.ghost.frequencyPenalty',
         stream: 'cc-completion.ghost.stream',
+        contextScoping: 'cc-completion.ghost.contextScoping',
     },
     Nes: {
         enabled: 'cc-completion.nes.enabled',
@@ -32,6 +33,7 @@ export const ConfigKeys = {
         presencePenalty: 'cc-completion.nes.presencePenalty',
         frequencyPenalty: 'cc-completion.nes.frequencyPenalty',
         stream: 'cc-completion.nes.stream',
+        contextScoping: 'cc-completion.nes.contextScoping',
         nextCursorPredictionEnabled: 'cc-completion.nes.nextCursorPrediction.enabled',
         mimicGhostTextBehavior: 'cc-completion.nes.mimicGhostTextBehavior',
     }
