@@ -25,10 +25,20 @@ export interface IContextBuilderService {
  * Brittle by design — avoids a full DI config dependency for a single setting key.
  * If more settings are needed, switch to proper IGhostConfigProvider/INesConfigProvider injection.
  */
+/** Flat symbol shape used for the workspace-wide symbol index. */
+interface SimpleSymbol {
+    name: string;
+    kind: vscode.SymbolKind;
+    containerName: string;
+    uri: string;
+    range: vscode.Range;
+}
+
 interface ContextConfig {
     ghostScoping: 'basic' | 'lsp';
     nesScoping: 'basic' | 'lsp';
     cacheMaxEntries: number;
+    workspaceIndexMode: 'off' | 'opened-files' | 'workspace';
 }
 
 function readConfig(): ContextConfig {
@@ -36,7 +46,8 @@ function readConfig(): ContextConfig {
     return {
         ghostScoping: cfg.get<'basic' | 'lsp'>('ghost.contextScoping', 'lsp'),
         nesScoping: cfg.get<'basic' | 'lsp'>('nes.contextScoping', 'lsp'),
-        cacheMaxEntries: cfg.get<number>('context.lspCacheMaxEntries', 100),
+        cacheMaxEntries: cfg.get<number>('context.lspCacheMaxEntries', 500),
+        workspaceIndexMode: cfg.get<'off' | 'opened-files' | 'workspace'>('context.workspaceIndexMode', 'workspace'),
     };
 }
 
@@ -51,12 +62,20 @@ export class ContextBuilderService implements IContextBuilderService {
 
     private readonly _cache = new LRUCacheMap<string, CacheEntry>(readConfig().cacheMaxEntries);
 
+    /** Per-file workspace symbol index keyed by document URI. Seeded on first gather, refreshed on save. */
+    private readonly _workspaceCache = new Map<string, SimpleSymbol[]>();
+    private _workspaceSeeded = false;
+
     constructor() {
-        // Invalidate cache for a document when its text changes.
-        // The LS will have updated its symbol tree by the time the next
-        // gather() call runs, so the cache will be repopulated fresh.
+        // Invalidate per-file cache when text changes (next gather re-fetches fresh data).
         vscode.workspace.onDidChangeTextDocument(e => {
             this._cache.delete(e.document.uri.toString());
+        });
+
+        // Re-query workspace index on save — all files are up to date at this point.
+        vscode.workspace.onDidSaveTextDocument(() => {
+            this._workspaceSeeded = false;
+            void this._seedWorkspaceCache();
         });
     }
 
@@ -69,14 +88,13 @@ export class ContextBuilderService implements IContextBuilderService {
         const languageId = document.languageId;
         const syntax = getSyntax(languageId);
 
-        // Check if context scoping is enabled for this pipeline.
-        // We don't know whether the caller is GHOST or NES, so we
-        // return a bundle with only the fields both consume.
-        // The caller (ghostTextComputer / nesWorkflow) can check
-        // its own config for the specific scoping gate.
-        // For now: always return LSP data if available.
+        // Seed workspace index on first gather (only if mode='workspace')
+        if (config.workspaceIndexMode === 'workspace' && !this._workspaceSeeded) {
+            this._workspaceSeeded = true;
+            void this._seedWorkspaceCache();
+        }
 
-        // LSP symbol lookup (cached)
+        // Per-file LSP symbol lookup (cached, invalidated on edit)
         let symbols = this._cache.get(uri);
         if (!symbols || symbols.lineCount !== document.lineCount) {
             const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
@@ -89,6 +107,9 @@ export class ContextBuilderService implements IContextBuilderService {
             };
             this._cache.set(uri, symbols);
         }
+
+        // Merge per-file symbols into workspace cache (keeps current file fresh)
+        this._mergeDocumentSymbols(document.uri.toString(), symbols.symbols);
 
         // Build the bundle
         const fileExports = extractFileExports(symbols.symbols, languageId);
@@ -107,6 +128,54 @@ export class ContextBuilderService implements IContextBuilderService {
             languageId,
             languageSyntax: syntax,
         };
+    }
+
+    /**
+     * Query the full workspace symbol index from the LSP and store in workspace cache.
+     * Called once on first gather and again on each file save.
+     */
+    private async _seedWorkspaceCache(): Promise<void> {
+        try {
+            const allSymbols = await vscode.commands.executeCommand<{ name: string; kind: vscode.SymbolKind; containerName: string; location: vscode.Location }[]>(
+                'vscode.executeWorkspaceSymbolProvider',
+                '',  // empty query returns all symbols
+            );
+            this._workspaceCache.clear();
+            if (allSymbols) {
+                for (const sym of allSymbols) {
+                    const uri = sym.location.uri.toString();
+                    if (!this._workspaceCache.has(uri)) {
+                        this._workspaceCache.set(uri, []);
+                    }
+                    this._workspaceCache.get(uri)!.push({
+                        name: sym.name,
+                        kind: sym.kind,
+                        containerName: sym.containerName,
+                        uri,
+                        range: sym.location.range,
+                    });
+                }
+            }
+        } catch {
+            // Workspace provider not available (e.g. LSP not started) — cache stays empty.
+        }
+    }
+
+    /**
+     * Convert a per-file DocumentSymbol tree to flat SimpleSymbol entries and
+     * merge into the workspace cache. Keeps the workspace index fresh for the
+     * current file without a full re-query.
+     */
+    private _mergeDocumentSymbols(uri: string, symbols: vscode.DocumentSymbol[]): void {
+        const flat: SimpleSymbol[] = [];
+        const walk = (list: vscode.DocumentSymbol[], container: string) => {
+            for (const sym of list) {
+                flat.push({ name: sym.name, kind: sym.kind, containerName: container, uri, range: sym.range });
+                if (sym.children) walk(sym.children, sym.name);
+            }
+        };
+        walk(symbols, '');
+        this._workspaceCache.set(uri, flat);
     }
 }
 

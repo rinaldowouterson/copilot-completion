@@ -152,10 +152,16 @@
         },
         "cc-completion.context.lspCacheMaxEntries": {
           "type": "number",
-          "default": 100,
+          "default": 500,
           "minimum": 10,
-          "maximum": 500,
+          "maximum": 2000,
           "description": "Max entries in the LSP symbol cache. Higher values cache more files at the cost of memory."
+        },
+        "cc-completion.context.workspaceIndexMode": {
+          "type": "string",
+          "enum": ["off", "opened-files", "workspace"],
+          "default": "workspace",
+          "description": "Symbol indexing scope: 'off' disables all LSP context; 'opened-files' queries only the file at cursor; 'workspace' (default) builds a full workspace symbol index for cross-file context."
         },
         "cc-completion.nes.contextScoping": {
           "type": "string",
