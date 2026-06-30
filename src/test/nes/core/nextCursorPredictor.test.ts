@@ -20,7 +20,7 @@ function parseLineNumber(line: string, keptRange: OffsetRange): Result<ParsedPre
     }
 
     const lastColonIdx = line.lastIndexOf(':');
-    if (lastColonIdx <= 0) {
+    if (lastColonIdx < 0) {
         return Result.error('gotNaN');
     }
 

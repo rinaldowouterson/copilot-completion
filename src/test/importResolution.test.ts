@@ -10,40 +10,86 @@ suite('Import Resolution — helpers', () => {
         const text = `import { User } from './user';
 import { greet } from '../utils/helpers';
 import * as fs from 'fs';`;
-        const specs = extractRelativeImportSpecifiers(text);
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./user', '../utils/helpers']);
     });
 
     test('extracts require specifiers', () => {
         const text = `const fs = require('fs');
 const helper = require('./helper');`;
-        const specs = extractRelativeImportSpecifiers(text);
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./helper']);
     });
 
     test('handles double-quoted specifiers', () => {
         const text = `import { User } from "./user";`;
-        const specs = extractRelativeImportSpecifiers(text);
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./user']);
     });
 
     test('returns empty for file with no imports', () => {
         const text = 'const x = 1;\nconsole.log(x);';
-        assert.deepStrictEqual(extractRelativeImportSpecifiers(text), []);
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
     });
 
     test('deduplicates identical specifiers', () => {
         const text = `import { User } from './user';
 import { UserRole } from './user';`;
-        const specs = extractRelativeImportSpecifiers(text);
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./user']);
     });
 
     test('skips package imports (non-relative)', () => {
         const text = `import { Component } from 'react';
 import { greet } from './greet';`;
-        const specs = extractRelativeImportSpecifiers(text);
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
         assert.deepStrictEqual(specs, ['./greet']);
+    });
+
+    // ── Language-specific ─────────────────────────────────────
+
+    test('extracts relative imports from Python', () => {
+        const text = `from . import User
+from .models import Post
+from .utils.helpers import format_date`;
+        const specs = extractRelativeImportSpecifiers(text, 'python');
+        assert.deepStrictEqual(specs, ['.', '.models', '.utils.helpers']);
+    });
+
+    test('extracts relative requires from Ruby', () => {
+        const text = `require './lib/helper'
+require_relative '../config/constants'`;
+        const specs = extractRelativeImportSpecifiers(text, 'ruby');
+        assert.deepStrictEqual(specs, ['./lib/helper', '../config/constants']);
+    });
+
+    test('extracts relative imports from Go', () => {
+        const text = `import "./pkg/helper"
+import "fmt"`;
+        const specs = extractRelativeImportSpecifiers(text, 'go');
+        assert.deepStrictEqual(specs, ['./pkg/helper']);
+    });
+
+    test('extracts relative imports from Dart', () => {
+        const text = `import '../other.dart'
+import 'package:foo/bar.dart'`;
+        const specs = extractRelativeImportSpecifiers(text, 'dart');
+        assert.deepStrictEqual(specs, ['../other.dart']);
+    });
+
+    test('extracts relative includes from C/C++', () => {
+        const text = `#include "header.h"
+#include <vector>`;
+        const specs = extractRelativeImportSpecifiers(text, 'cpp');
+        assert.deepStrictEqual(specs, ['header.h']);
+    });
+
+    test('extracts relative requires from PHP', () => {
+        const text = `require './lib/helper.php';
+include '../config.php';
+require_once './vendor/autoload.php';`;
+        const specs = extractRelativeImportSpecifiers(text, 'php');
+        assert.deepStrictEqual(specs, ['./lib/helper.php', '../config.php', './vendor/autoload.php']);
     });
 
     // ── normalizePath ─────────────────────────────────────────
@@ -52,6 +98,94 @@ import { greet } from './greet';`;
         assert.strictEqual(normalizePath('/a/b/c/./d'), '/a/b/c/d');
         assert.strictEqual(normalizePath('/a/b/c/../d'), '/a/b/d');
         assert.strictEqual(normalizePath('a/b/../c/./d'), 'a/c/d');
+    });
+
+    // ── Unhandled / edge-case languages ───────────────────────
+
+    test('Java imports return empty (package-based, not filesystem)', () => {
+        const text = `import java.util.List;
+import com.example.Foo;
+import static org.junit.Assert.*;`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'java'), []);
+    });
+
+    test('C# imports return empty (namespace-based)', () => {
+        const text = `using System;
+using System.Collections.Generic;
+using static System.Math;`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'csharp'), []);
+    });
+
+    test('Rust imports return empty (:: paths via build system)', () => {
+        const text = `use std::collections::HashMap;
+use crate::module::Item;
+use super::helper;`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'rust'), []);
+    });
+
+    test('Elixir imports return empty (module aliases, no paths)', () => {
+        const text = `import Enum
+alias MyApp.User
+require Logger`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'elixir'), []);
+    });
+
+    test('Haskell imports return empty (package-based modules)', () => {
+        const text = `import Data.List
+import qualified Data.Map as M
+import Data.Maybe (fromJust)`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'haskell'), []);
+    });
+
+    test('Lua detects relative require paths', () => {
+        const text = `local m = require "mod.sub"
+local n = require "./relative"`;
+        const specs = extractRelativeImportSpecifiers(text, 'lua');
+        // Lua's `require "./relative"` is a relative path ✓
+        // `require "mod.sub"` is not relative (no ./ or ../ prefix)
+        assert.deepStrictEqual(specs, ['./relative']);
+    });
+
+    test('unknown language ID returns empty gracefully', () => {
+        const text = `import { X } from './foo';`;
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'unknown-lang'), []);
+    });
+
+    test('null-safe: language ID does not cause crash', () => {
+        const text = 'const x = 1;';
+        assert.doesNotThrow(() => extractRelativeImportSpecifiers(text, ''));
+        assert.doesNotThrow(() => extractRelativeImportSpecifiers(text, '   '));
+    });
+
+    test('empty text returns empty array', () => {
+        assert.deepStrictEqual(extractRelativeImportSpecifiers('', 'typescript'), []);
+    });
+
+    test('malformed imports (missing closing quote) skip gracefully', () => {
+        const text = `import { X } from './foo;`; // missing closing quote
+        assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
+    });
+
+    test('mixed import styles in same file', () => {
+        const text = `import { X } from './foo';
+const y = require('./bar');
+import { Z } from './baz';`;
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        assert.deepStrictEqual(specs, ['./foo', './bar', './baz']);
+    });
+
+    test('@@ syntax should not confuse extractor', () => {
+        const text = `@import './style.css'
+import { X } from './module'`;
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        assert.deepStrictEqual(specs, ['./module']);
+    });
+
+    test('dynamic import() syntax', () => {
+        const text = `const mod = import('./lazy');
+import('./other').then(m => ...);`;
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        assert.deepStrictEqual(specs, ['./lazy', './other']);
     });
 });
 

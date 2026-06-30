@@ -28,11 +28,13 @@ suite('BoundaryMarkerParser', () => {
         assert.deepStrictEqual(result, ['line1', 'line2']);
     });
 
-    test('returns all non-empty lines when no markers present', () => {
+    test('returns empty array when no markers present (waiting for streaming)', () => {
         const parser = new BoundaryMarkerParser();
         const input = ['line1', 'line2', '', 'line3'];
         const result = parser.process(input, makeContext());
-        assert.deepStrictEqual(result, ['line1', 'line2', 'line3']);
+        // The parser is designed to wait for boundary markers in the stream.
+        // Returning [] signals "more content needed" — the edit is incomplete.
+        assert.deepStrictEqual(result, []);
     });
 
     test('handles missing start marker', () => {

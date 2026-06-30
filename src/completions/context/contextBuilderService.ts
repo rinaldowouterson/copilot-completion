@@ -135,7 +135,7 @@ export class ContextBuilderService implements IContextBuilderService {
 
         // Resolve import targets via LSP document links (cached per-file)
         const importResolutions = config.ghostScoping === 'lsp' || config.nesScoping === 'lsp'
-            ? await this._resolveImportTargets(document.uri, document.getText())
+            ? await this._resolveImportTargets(document.uri, document.getText(), languageId)
             : [];
 
         return {
@@ -212,12 +212,13 @@ export class ContextBuilderService implements IContextBuilderService {
     private async _resolveImportTargets(
         sourceUri: vscode.Uri,
         sourceText: string,
+        languageId: string,
     ): Promise<ImportResolution[]> {
         const startTime = Date.now();
         const resolved: ImportResolution[] = [];
         const seen = new Set<string>();
 
-        const specifiers = extractRelativeImportSpecifiers(sourceText);
+        const specifiers = extractRelativeImportSpecifiers(sourceText, languageId);
         if (specifiers.length === 0) return [];
 
         const sourceDir = sourceUri.fsPath ? sourceUri.fsPath.substring(0, sourceUri.fsPath.lastIndexOf('/')) : '';
@@ -227,7 +228,7 @@ export class ContextBuilderService implements IContextBuilderService {
             if (seen.has(specifier)) continue;
             seen.add(specifier);
 
-            const targetUri = await resolveSpecifierToUri(specifier, sourceDir, sourceUri.scheme);
+            const targetUri = await resolveSpecifierToUri(specifier, sourceDir, sourceUri.scheme, languageId);
             if (!targetUri) continue;
 
             const targetUriStr = targetUri.toString();
@@ -272,64 +273,175 @@ export class ContextBuilderService implements IContextBuilderService {
 }
 
 /**
- * Extract relative import specifiers from source text.
+ * Extract relative import specifiers from source text, language-aware.
  *
- * Finds `from '...'` and `require('...')` patterns where the specifier starts
- * with `./` or `../`. This is a simple character-level scan — no regex AST.
+ * Supports:
+ *   - JS/TS:   import { X } from './foo'    /   require('./foo')
+ *   - Python:  from . import X              /   from .module import X
+ *   - Ruby:    require './file'             /   require_relative './file'
+ *   - Go:      import "./pkg"
+ *   - Dart:    import './file.dart'
+ *   - PHP:     require './file.php'         /   include './file.php'
+ *   - C/C++:   #include "file.h"
  *
  * @internal Exported for unit testing only.
  */
-export function extractRelativeImportSpecifiers(text: string): string[] {
+export function extractRelativeImportSpecifiers(text: string, languageId: string): string[] {
     const specifiers: string[] = [];
     const seen = new Set<string>();
     let i = 0;
 
     while (i < text.length) {
-        // Look for `from` or `require` keyword
-        const fromIdx = text.indexOf('from', i);
-        const requireIdx = text.indexOf('require', i);
-        let keywordIdx = -1;
+        const scanResult = scanNextImportPattern(text, i, languageId);
+        if (!scanResult) break;
 
-        if (fromIdx >= 0 && (requireIdx < 0 || fromIdx < requireIdx)) {
-            keywordIdx = fromIdx + 4; // past 'from'
-        } else if (requireIdx >= 0) {
-            keywordIdx = requireIdx + 7; // past 'require'
-        } else {
-            break; // no more imports
-        }
-
-        // Find the opening quote after the keyword
-        const quoteStart = text.indexOf('\'', keywordIdx);
-        const dquoteStart = text.indexOf('"', keywordIdx);
-        let quoteChar: string | null = null;
-        let specStart = -1;
-
-        if (quoteStart >= 0 && (dquoteStart < 0 || quoteStart < dquoteStart)) {
-            quoteChar = '\'';
-            specStart = quoteStart + 1;
-        } else if (dquoteStart >= 0) {
-            quoteChar = '"';
-            specStart = dquoteStart + 1;
-        }
-
-        if (quoteChar && specStart >= 0) {
-            const specEnd = text.indexOf(quoteChar, specStart);
-            if (specEnd > specStart) {
-                const specifier = text.slice(specStart, specEnd);
-                // Only follow relative imports
-                if ((specifier.startsWith('./') || specifier.startsWith('../')) && !seen.has(specifier)) {
-                    seen.add(specifier);
-                    specifiers.push(specifier);
-                }
-                i = specEnd + 1;
-                continue;
+        const { nextIndex, specifier, isQuotedInclude } = scanResult;
+        if (specifier && !seen.has(specifier)) {
+            // Accept: ./path, ../path, . (Python), .module (Python), or #include "..." (always relative)
+            const isRelativePath = specifier.startsWith('./') || specifier.startsWith('../');
+            const isRelativePython = languageId === 'python' && specifier.startsWith('.');
+            if (isRelativePath || isRelativePython || isQuotedInclude) {
+                seen.add(specifier);
+                specifiers.push(specifier);
             }
         }
-        // Move past the keyword to avoid infinite loop
-        i = Math.max(fromIdx >= 0 ? fromIdx + 1 : 0, requireIdx >= 0 ? requireIdx + 1 : 0) + 1;
+        i = nextIndex;
     }
 
     return specifiers;
+}
+
+interface ScanResult {
+    nextIndex: number;
+    specifier: string | undefined;
+    /** Only `#include "..."` and similar quotes-include patterns: always relative. */
+    isQuotedInclude: boolean;
+}
+
+/**
+ * Scan for the next import-like pattern starting from position `i`.
+ * Language-aware: checks different keywords depending on languageId.
+ */
+function scanNextImportPattern(text: string, i: number, languageId: string): ScanResult | undefined {
+    // Pattern table: [keyword, advancePastKeyword, handler] for each language family
+    type Pattern = [keyword: string, advance: number];
+    const patterns: Pattern[] = [];
+
+    if (languageId.startsWith('typescript') || languageId.startsWith('javascript')) {
+        patterns.push(['from ', 5]);
+        patterns.push(['require(', 8]);
+        patterns.push(['require.resolve(', 17]);
+        patterns.push(['import(', 7]);
+    }
+    if (['ruby'].includes(languageId)) {
+        patterns.push(['require "', 9]);
+        patterns.push(["require '", 9]);
+        patterns.push(['require_relative "', 18]);
+        patterns.push(["require_relative '", 18]);
+    }
+    if (['python'].includes(languageId)) {
+        patterns.push(['from ', 5]);
+    }
+    if (['go', 'dart'].includes(languageId)) {
+        patterns.push(['import "', 8]);
+        patterns.push(["import '", 8]);
+    }
+    if (['php'].includes(languageId)) {
+        patterns.push(['require "', 9]);
+        patterns.push(["require '", 9]);
+        patterns.push(['include "', 9]);
+        patterns.push(["include '", 9]);
+        patterns.push(['require_once "', 14]);
+        patterns.push(["require_once '", 14]);
+        patterns.push(['include_once "', 14]);
+        patterns.push(["include_once '", 14]);
+    }
+    if (['c', 'cpp', 'csharp'].includes(languageId)) {
+        patterns.push(['#include "', 10]);
+    }
+    if (['lua'].includes(languageId)) {
+        patterns.push(['require "', 9]);
+        patterns.push(["require '", 9]);
+    }
+
+    // Find the earliest match across all patterns
+    let earliestIdx = -1;
+    let earliestPattern: Pattern | undefined;
+    for (const pattern of patterns) {
+        const idx = text.indexOf(pattern[0], i);
+        if (idx >= 0 && (earliestIdx < 0 || idx < earliestIdx)) {
+            earliestIdx = idx;
+            earliestPattern = pattern;
+        }
+    }
+    if (!earliestPattern) return undefined;
+
+    const [keyword, advance] = earliestPattern;
+
+    // Python 'from . import X': specifier is dot-prefixed module path (no quotes)
+    if (languageId === 'python' && keyword === 'from ') {
+        const afterFrom = earliestIdx + advance;
+        let specStart = afterFrom;
+        while (specStart < text.length && (text[specStart] === ' ' || text[specStart] === '\t')) specStart++;
+        if (specStart >= text.length) return undefined;
+        if (text[specStart] !== '.') return undefined; // skip absolute/non-relative
+        let specEnd = specStart;
+        while (specEnd < text.length && /[\w.]/.test(text[specEnd])) specEnd++;
+        const specifier = text.slice(specStart, specEnd);
+        if (specifier) return { nextIndex: specEnd, specifier, isQuotedInclude: false };
+        return undefined;
+    }
+
+    // For keywords that already include the opening quote (require ", import ", #include ")
+    if (keyword.endsWith('"') || keyword.endsWith("'")) {
+        const quoteChar = keyword[keyword.length - 1];
+        const specStart = earliestIdx + advance;
+        const specEnd = text.indexOf(quoteChar, specStart);
+        if (specEnd <= specStart) return undefined;
+        const specifier = text.slice(specStart, specEnd);
+        const isQuotedInclude = keyword === '#include "';
+        return { nextIndex: specEnd + 1, specifier, isQuotedInclude };
+    }
+
+    // For 'from' (non-Python): from '...' import X
+    if (keyword === 'from ') {
+        const startQuote = findQuote(text, earliestIdx + advance);
+        if (!startQuote) return undefined;
+        const specStart = startQuote.idx + 1;
+        const specEnd = text.indexOf(startQuote.char, specStart);
+        if (specEnd <= specStart) return undefined;
+        const specifier = text.slice(specStart, specEnd);
+        return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
+    }
+
+    // For keywords ending with '(' (require(), import()), find the quoted arg
+    if (keyword.endsWith('(')) {
+        const startQuote = findQuote(text, earliestIdx + advance);
+        if (!startQuote) return undefined;
+        const specStart = startQuote.idx + 1;
+        const specEnd = text.indexOf(startQuote.char, specStart);
+        if (specEnd <= specStart) return undefined;
+        const specifier = text.slice(specStart, specEnd);
+        return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
+    }
+
+    // General case: keyword followed by whitespace then a quoted string
+    const startQuote = findQuote(text, earliestIdx + advance);
+    if (!startQuote) return undefined;
+    const specStart = startQuote.idx + 1;
+    const specEnd = text.indexOf(startQuote.char, specStart);
+    if (specEnd <= specStart) return undefined;
+    const specifier = text.slice(specStart, specEnd);
+    return { nextIndex: specEnd + 1, specifier, isQuotedInclude: false };
+}
+
+/** Find the next single or double quote in text starting from `pos`. */
+function findQuote(text: string, pos: number): { char: string; idx: number } | undefined {
+    for (let j = pos; j < text.length; j++) {
+        if (text[j] === '\'') return { char: '\'', idx: j };
+        if (text[j] === '"') return { char: '"', idx: j };
+    }
+    return undefined;
 }
 
 /**
@@ -338,8 +450,8 @@ export function extractRelativeImportSpecifiers(text: string): string[] {
  * Order: .ts, .tsx, .js, .jsx, .mjs, .cjs, /index.ts, /index.js
  */
 /** @internal Exported for unit testing only. */
-export async function resolveSpecifierToUri(specifier: string, sourceDir: string, scheme: string): Promise<vscode.Uri | undefined> {
-    const extensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+export async function resolveSpecifierToUri(specifier: string, sourceDir: string, scheme: string, languageId: string = 'typescript'): Promise<vscode.Uri | undefined> {
+    const extensions = getExtensionsForLanguage(languageId);
     const indexVariants = extensions.map(e => `/index${e}`);
 
     const candidates = [
@@ -362,6 +474,39 @@ export async function resolveSpecifierToUri(specifier: string, sourceDir: string
         }
     }
     return undefined;
+}
+
+/**
+ * Return the file extensions to try for the given language, ordered by likelihood.
+ */
+function getExtensionsForLanguage(languageId: string): string[] {
+    switch (languageId) {
+        case 'typescript':
+        case 'typescriptreact':
+            return ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+        case 'javascript':
+        case 'javascriptreact':
+            return ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'];
+        case 'python':
+            return ['.py'];
+        case 'ruby':
+            return ['.rb'];
+        case 'go':
+            return ['.go'];
+        case 'dart':
+            return ['.dart'];
+        case 'php':
+            return ['.php'];
+        case 'c':
+        case 'cpp':
+        case 'csharp':
+            return ['.h', '.hpp', '.c', '.cpp', '.cs'];
+        case 'rust':
+            // Rust uses :: paths resolved by the build system, not filesystem lookups
+            return ['.rs'];
+        default:
+            return ['.ts', '.js', '.py', '.rb', '.go', '.rs'];
+    }
 }
 
 /** Normalize a file path: resolve . and .. segments. Preserves leading slash. */

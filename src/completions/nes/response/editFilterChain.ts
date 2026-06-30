@@ -26,9 +26,10 @@ export class WhitespaceOnlyFilter implements IEditFilter {
     readonly name = 'WhitespaceOnlyFilter';
 
     shouldReject(editLines: string[], editWindowLines: string[]): boolean {
-        const nonWsEdit = editLines.filter(l => l.trim()).join('\n');
-        const nonWsOrig = editWindowLines.filter(l => l.trim()).join('\n');
-        return nonWsEdit === nonWsOrig;
+        // Trim each line before comparing non-whitespace content,
+        // so that whitespace-only formatting changes are rejected.
+        const strip = (lines: string[]) => lines.map(l => l.trim()).filter(l => l).join('\n');
+        return strip(editLines) === strip(editWindowLines);
     }
 }
 
