@@ -11,9 +11,19 @@ export class EditWindowResolver {
         public maxMergeConflictLines: number = 50,
     ) {}
 
-    resolve(documentLines: string[], cursorLine: number): OffsetRange {
+    /**
+     * @param statementEndLine Optional 0-based line where the current expression ends.
+     *                         When provided and closer than nLinesBelow, it shrinks
+     *                         the edit window to reduce prompt noise.
+     */
+    resolve(documentLines: string[], cursorLine: number, statementEndLine?: number): OffsetRange {
         let start = Math.max(0, cursorLine - this.nLinesAbove);
-        let endExcl = Math.min(documentLines.length, cursorLine + this.nLinesBelow + 1);
+        const defaultEnd = Math.min(documentLines.length, cursorLine + this.nLinesBelow + 1);
+        const shrunkEnd = statementEndLine !== undefined ? statementEndLine + 1 : defaultEnd;
+        let endExcl = Math.min(documentLines.length, shrunkEnd);
+        // Never shrink below the cursor line + 2 (enough context for the LLM)
+        const minEnd = Math.min(documentLines.length, cursorLine + 2);
+        if (endExcl < minEnd) endExcl = minEnd;
 
         const conflictRange = findMergeConflictMarkersRange(
             documentLines,

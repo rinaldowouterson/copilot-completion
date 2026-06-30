@@ -13,6 +13,7 @@ import { EditResultAssembler } from './editResultAssembler';
 import { ResponsePipeline, ResponsePipelineContext } from '../response/responsePipeline';
 import { EditFilterChain } from '../response/editFilterChain';
 import { NesHistoryTracker } from './nesHistoryTracker';
+import { IContextBuilderService } from '../../context/contextBuilderService';
 import { Deferred } from '../../../common/async';
 
 // Module-level rate limiting (matches original fetch.ts design)
@@ -51,6 +52,7 @@ export class NesWorkflow {
         @ILLMAdapterManager private readonly _llmManager: ILLMAdapterManager,
         @ILogService private readonly _log: ILogService,
         @INextEditCache private readonly _cache: INextEditCache,
+        @IContextBuilderService private readonly _contextBuilder: IContextBuilderService,
     ) {
         this._promptAssembler = new PromptAssembler(_config, this._editWindowResolver);
         this._resultAssembler = new EditResultAssembler(this._editWindowResolver);
@@ -142,11 +144,14 @@ export class NesWorkflow {
             return { editResult: undefined };
         }
 
-        // Step 2: Build prompt
+        // Step 2: Build prompt (with optional LSP context)
         let promptAssembly;
         try {
             const xtabHistory = this._historyTracker.getHistory(DocumentId.create(document.uri.toString()));
-            promptAssembly = this._promptAssembler.assemble(document, position,lintEnable, xtabHistory);
+            const ctxBundle = this._config.contextScoping === 'lsp'
+                ? await this._contextBuilder.gather(document, position)
+                : undefined;
+            promptAssembly = this._promptAssembler.assemble(document, position, lintEnable, xtabHistory, ctxBundle);
             this._log.debug('\n' + promptAssembly.userPrompt);
         } catch {
             this._log.info(`[NES]  SKIP — prompt too large`);

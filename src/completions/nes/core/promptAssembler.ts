@@ -9,6 +9,7 @@ import { StringText } from '../stubs/abstractText';
 import { Position } from '../stubs/position';
 import { OffsetRange } from '../stubs/offsetRange';
 import { EditWindowResolver } from './editWindowResolver';
+import { ContextBundle } from '../../../common/contextBundle';
 
 export interface PromptAssembly {
     promptPieces: PromptPieces;
@@ -29,15 +30,16 @@ export class PromptAssembler {
         position: vscode.Position,
         lintEnable: boolean,
         xtabHistory?: readonly IXtabHistoryEntry[],
+        context?: ContextBundle,
     ): PromptAssembly {
         const normalizedText = document.getText().replace(/\r\n/g, '\n');
         const effectivePosition = position;
         const cursorPos = new Position(effectivePosition.line + 1, effectivePosition.character + 1);
         const currentDocument = new CurrentDocument(new StringText(normalizedText), cursorPos);
 
-        // Resolve edit window range
+        // Resolve edit window range (shrunken by statement end if available)
         const normalizedLines = normalizedText.split('\n');
-        const ewRange = this._editWindowResolver.resolve(normalizedLines, effectivePosition.line);
+        const ewRange = this._editWindowResolver.resolve(normalizedLines, effectivePosition.line, context?.statementEndLine);
 
         // Area around edit window range — use effectivePosition so NCP retry centers on the predicted position
         const aaStart = Math.max(0, effectivePosition.line - N_LINES_AS_CONTEXT);
@@ -85,7 +87,21 @@ export class PromptAssembler {
         const prediction = editWindowLines.join('\n');
 
         const systemPrompt = "Predict the next code edit based on user context.";
+
+        // Context bundle additions (only when LSP data is available)
+        let contextNote = '';
+        if (context) {
+            if (context.fileExports.length > 0) {
+                const exportsList = context.fileExports.map(e => `${e.name} (${e.kind})`).join(', ');
+                contextNote += `<|file_exports|>\n${exportsList}\n<|/file_exports|>\n`;
+            }
+            if (context.enclosingScope) {
+                contextNote += `<|scope|>\n${context.enclosingScope.kind} ${context.enclosingScope.name} (line ${context.enclosingScope.startLine}–${context.enclosingScope.endLine})\n<|/scope|>\n`;
+            }
+        }
+
         const userPrompt = baseUserPrompt 
+                + contextNote
                 + `current document is ${document.languageId}. **Just can improve \`code_to_edit\` section and output modifying result. Don't return other content.**`
                 + `\n\nThe output example is as follows:\n\n\`\`\`\n###remain edit start boundary line###\n${prediction}\n###remain edit end boundary line###\n\`\`\`\n`;
 
