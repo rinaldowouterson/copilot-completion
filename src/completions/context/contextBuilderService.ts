@@ -120,6 +120,16 @@ export class ContextBuilderService implements IContextBuilderService {
             syntax,
         );
 
+        // Context gathered successfully — log summary
+        if (fileExports.length > 0 || enclosingScope) {
+            const scopeInfo = enclosingScope
+                ? `scope=${enclosingScope.kind} ${enclosingScope.name} (${enclosingScope.startLine}-${enclosingScope.endLine})`
+                : 'no_enclosing_scope';
+            const exportCount = fileExports.length;
+            const wsFiles = this._workspaceCache.size;
+            console.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}`);
+        }
+
         return {
             enclosingScope,
             statementEndLine,

@@ -134,7 +134,7 @@ export class NesWorkflow {
                 return { editResult: undefined };
             }
             const result = this._buildResultFromCached(cached, document, position);
-            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start}, end =${result.range.end}), cursorAfterEdit = ${result.cursorAfterEdit}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
+            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start.line}:${result.range.start.character}, end = ${result.range.end.line}:${result.range.end.character}), cursorAfterEdit = ${result.cursorAfterEdit ? `${result.cursorAfterEdit.line}:${result.cursorAfterEdit.character}` : 'none'}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
             return { editResult: result };
         }
         this._log.debug(`[NES]  cache_miss [${Date.now() - t1}ms]`);
@@ -151,6 +151,9 @@ export class NesWorkflow {
             const ctxBundle = this._config.contextScoping === 'lsp'
                 ? await this._contextBuilder.gather(document, position)
                 : undefined;
+            if (ctxBundle?.enclosingScope) {
+                this._log.debug(`[NES] context scope=${ctxBundle.enclosingScope.kind} ${ctxBundle.enclosingScope.name} exports=${ctxBundle.fileExports.length}`);
+            }
             promptAssembly = this._promptAssembler.assemble(document, position, lintEnable, xtabHistory, ctxBundle);
             this._log.debug('\n' + promptAssembly.userPrompt);
         } catch {
@@ -308,7 +311,7 @@ export class NesWorkflow {
             if (firstResult) {
                 const totalMs = Date.now() - t0;
                 this._log.info(`[NES]  RESULT (streaming) edit=${firstResult.edit.length}ch total=${totalMs}ms`);
-                this._log.info(`edit = '${firstResult.edit}', editfull = '${firstResult.fullEditText}'\n range = (start = ${firstResult.range.start}, end =${firstResult.range.end}), cursorAfterEdit = ${firstResult.cursorAfterEdit}\njump = ${firstResult.isFromCursorJump}, ${firstResult.jumpToPosition}`);
+                this._log.info(`edit = '${firstResult.edit}', editfull = '${firstResult.fullEditText}'\n range = (start = ${firstResult.range.start.line}:${firstResult.range.start.character}, end = ${firstResult.range.end.line}:${firstResult.range.end.character}), cursorAfterEdit = ${firstResult.cursorAfterEdit ? `${firstResult.cursorAfterEdit.line}:${firstResult.cursorAfterEdit.character}` : 'none'}\njump = ${firstResult.isFromCursorJump}, ${firstResult.jumpToPosition}`);
                 const nesResult: NesExecutionResult = { editResult: firstResult, promptPieces: promptAssembly.promptPieces };
                 deferred.resolve(nesResult);
                 return nesResult;
@@ -357,7 +360,7 @@ export class NesWorkflow {
 
             const totalMs = Date.now() - t0;
             this._log.info(`[NES]  RESULT (fallback) edit=${result.edit.length}ch total=${totalMs}ms`);
-            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start}, end =${result.range.end}), cursorAfterEdit = ${result.cursorAfterEdit}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
+            this._log.info(`edit = '${result.edit}', editfull = '${result.fullEditText}'\n range = (start = ${result.range.start.line}:${result.range.start.character}, end = ${result.range.end.line}:${result.range.end.character}), cursorAfterEdit = ${result.cursorAfterEdit ? `${result.cursorAfterEdit.line}:${result.cursorAfterEdit.character}` : 'none'}\njump = ${result.isFromCursorJump}, ${result.jumpToPosition}`);
 
             const nesResult: NesExecutionResult = { editResult: result, promptPieces: promptAssembly.promptPieces };
             deferred.resolve(nesResult);

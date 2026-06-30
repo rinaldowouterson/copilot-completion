@@ -176,6 +176,9 @@ export class GhostTextComputer {
         const contextBundle = this._config.contextScoping === 'lsp'
             ? await this._contextBuilder.gather(document, position)
             : undefined;
+        if (contextBundle?.enclosingScope) {
+            this._log.debug(`[GHOST] context scope=${contextBundle.enclosingScope.kind} ${contextBundle.enclosingScope.name} exports=${contextBundle.fileExports.length}`);
+        }
         let prompt = this._promptFactory.createPrompt({
             template: this._config.promptTemplate,
             prefix,
