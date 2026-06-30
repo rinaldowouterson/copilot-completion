@@ -73,6 +73,15 @@ export class GhostPromptFactory implements IGhostPromptFactory {
             contextLines.push(`${commentPrefix} file exports: ${names}`);
         }
 
+        // Context bundle: import resolutions (cap at 5)
+        if (params.context?.importResolutions && params.context.importResolutions.length > 0) {
+            for (const imp of params.context.importResolutions.slice(0, 5)) {
+                const pathLabel = imp.uri.split('/').pop() || imp.uri;
+                const names = imp.exports.map(e => e.name).join(', ');
+                contextLines.push(`${commentPrefix} import ${pathLabel} → ${names}`);
+            }
+        }
+
         const context = contextLines.join('\n') + '\n';
         return params.template
             .replace(/\{prefix\}/g, '\n' + context + params.prefix)

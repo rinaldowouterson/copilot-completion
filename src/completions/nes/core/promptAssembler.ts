@@ -98,6 +98,14 @@ export class PromptAssembler {
             if (context.enclosingScope) {
                 contextNote += `<|scope|>\n${context.enclosingScope.kind} ${context.enclosingScope.name} (line ${context.enclosingScope.startLine}–${context.enclosingScope.endLine})\n<|/scope|>\n`;
             }
+            if (context.importResolutions && context.importResolutions.length > 0) {
+                const lines = context.importResolutions.slice(0, 5).map(imp => {
+                    const pathLabel = imp.uri.split('/').pop() || imp.uri;
+                    const names = imp.exports.map(e => e.name).join(', ');
+                    return `${pathLabel} → ${names}`;
+                });
+                contextNote += `<|imports|>\n${lines.join('\n')}\n<|/imports|>\n`;
+            }
         }
 
         const userPrompt = baseUserPrompt 

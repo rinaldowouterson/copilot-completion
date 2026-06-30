@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { createServiceIdentifier } from '../../di/services';
 import { ServiceIdentifier } from '../../di/instantiation';
-import { ContextBundle, FileExport, EnclosingScope } from '../../common/contextBundle';
+import { ContextBundle, FileExport, EnclosingScope, ImportResolution } from '../../common/contextBundle';
 import { getSyntax, findStatementEnd } from '../../common/languageSyntax';
 import { LRUCacheMap } from '../../common/lruCacheMap';
 import { ILogService } from '../shared/log/logService';
@@ -133,11 +133,17 @@ export class ContextBuilderService implements IContextBuilderService {
             this._log.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}`);
         }
 
+        // Resolve import targets via LSP document links (cached per-file)
+        const importResolutions = config.ghostScoping === 'lsp' || config.nesScoping === 'lsp'
+            ? await this._resolveImportTargets(document.uri, document.getText())
+            : [];
+
         return {
             enclosingScope,
             statementEndLine,
             fileExports,
             missingImports: [], // deferred — cross-file import detection in a follow-up
+            importResolutions,
             languageId,
             languageSyntax: syntax,
         };
@@ -189,6 +195,90 @@ export class ContextBuilderService implements IContextBuilderService {
         };
         walk(symbols, '');
         this._workspaceCache.set(uri, flat);
+    }
+
+    /**
+     * Resolve import statements to their target files via the LSP document link provider.
+     *
+     * For each resolved workspace-local target, fetches its DocumentSymbol tree
+     * (via the per-file LRU cache) and extracts exported symbols.
+     *
+     * Limited to 5 unique targets to keep prompt size bounded.
+     * Skips non-file targets (https:, node_modules outside workspace, etc.).
+     */
+    private async _resolveImportTargets(
+        sourceUri: vscode.Uri,
+        _sourceText: string,
+    ): Promise<ImportResolution[]> {
+        const startTime = Date.now();
+        const resolved: ImportResolution[] = [];
+        const seen = new Set<string>();
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+
+        try {
+            const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+                'vscode.executeDocumentLinkProvider',
+                sourceUri,
+            );
+
+            if (!links || links.length === 0) {
+                return [];
+            }
+
+            for (const link of links) {
+                if (resolved.length >= 5) break; // cap at 5
+
+                const target = link.target;
+                if (!target) continue;
+                if (target.scheme !== 'file') continue; // skip https://, mailto:, etc.
+
+                const targetUriStr = target.toString();
+                if (seen.has(targetUriStr)) continue;
+                seen.add(targetUriStr);
+
+                // Skip files outside workspace (e.g. node_modules resolved outside)
+                if (workspaceFolders && !workspaceFolders.some(f => targetUriStr.startsWith(f.uri.toString()))) {
+                    continue;
+                }
+
+                // Skip the source file itself
+                if (targetUriStr === sourceUri.toString()) continue;
+
+                try {
+                    // Open the target document and fetch its symbols (hits LRU cache)
+                    const targetDoc = await vscode.workspace.openTextDocument(target);
+                    const targetUri = targetDoc.uri.toString();
+
+                    let symbols = this._cache.get(targetUri);
+                    if (!symbols || symbols.lineCount !== targetDoc.lineCount) {
+                        const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                            'vscode.executeDocumentSymbolProvider',
+                            targetDoc.uri,
+                        );
+                        symbols = {
+                            symbols: rawSymbols ?? [],
+                            lineCount: targetDoc.lineCount,
+                        };
+                        this._cache.set(targetUri, symbols);
+                    }
+
+                    const exports = extractFileExports(symbols.symbols, targetDoc.languageId);
+                    if (exports.length > 0) {
+                        resolved.push({ uri: targetUriStr, exports });
+                    }
+                } catch {
+                    // File might be binary, deleted, or inaccessible — skip silently
+                    continue;
+                }
+            }
+        } catch {
+            // Document link provider not available for this language — silent
+        }
+
+        if (resolved.length > 0) {
+            this._log.debug(`[CONTEXT] resolved ${resolved.length} imports in ${Date.now() - startTime}ms`);
+        }
+        return resolved;
     }
 }
 

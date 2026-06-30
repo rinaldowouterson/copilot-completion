@@ -35,6 +35,17 @@ export interface MissingImport {
     sourceModule?: string;
 }
 
+/**
+ * An import statement resolved to its target file's exported symbols.
+ * Produced by the LSP's document link provider — no regex, no AST.
+ */
+export interface ImportResolution {
+    /** The resolved absolute URI of the imported file (string form). */
+    uri: string;
+    /** Exported symbols from that file. */
+    exports: FileExport[];
+}
+
 /** The enclosing scope around the cursor position. */
 export interface EnclosingScope {
     kind: string;  // 'Function' | 'Class' | 'Interface' | 'Method' | ...
@@ -68,6 +79,14 @@ export interface ContextBundle {
 
     /** Symbols referenced in the current file that are not yet imported. */
     missingImports: MissingImport[];
+
+    /**
+     * Resolved import targets with their exported symbols.
+     * Each entry corresponds to one unique import statement in the current file,
+     * resolved via the LSP document link provider. Limited to the first 5 unique
+     * workspace-local imports to keep prompt size bounded.
+     */
+    importResolutions: ImportResolution[];
 
     /** The language ID (from VS Code). */
     languageId: string;
