@@ -16,16 +16,20 @@ export interface ILogService {
 
 export class LogService implements ILogService {
     readonly _serviceBrand: undefined;
-    private readonly _channel: vscode.LogOutputChannel;
+    private _channel: vscode.OutputChannel;
 
     constructor() {
-        this._channel = vscode.window.createOutputChannel('CC Completion', { log: true });
+        this._channel = vscode.window.createOutputChannel('CC Completion');
     }
 
-    info(message: string): void { this._channel.info(message); }
-    warn(message: string): void { this._channel.warn(message); }
-    error(message: string): void { this._channel.error(message); }
-    debug(message: string): void { this._channel.debug(message); }
+    info(message: string): void { this._channel.appendLine(`[info] ${message}`); }
+    warn(message: string): void { this._channel.appendLine(`[warn] ${message}`); }
+    error(message: string): void { this._channel.appendLine(`[error] ${message}`); }
+    debug(message: string): void { this._channel.appendLine(`[debug] ${message}`); }
     show(): void { this._channel.show(); }
-    clear(): void { this._channel.clear(); }
+
+    clear(): void {
+        this._channel.clear();
+        this._channel.appendLine('[CC Completion] ===== session start =====');
+    }
 }
