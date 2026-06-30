@@ -125,6 +125,12 @@ export class GhostTextComputer {
                 document,
                 position,
             );
+            // Reject if the cached result contains chat editing markup
+            if (containsChatMarkup(cacheResult.text)) {
+                this._log.info(`[GHOST] SKIP — cached result contains chat editing markup`);
+                return undefined;
+            }
+
             this._log.info(`[GHOST] CACHE_HIT count=${cached.length} result="${this._trunc(cacheResult.text, 60)}" [${Date.now() - t2}ms] total=${Date.now() - t0}ms`);
             const ghostCompletionCache = this._toGhostCompletion(cacheResult, document, position, isMiddleOfTheLine);
             this._currentGhostText.setGhostText(prefix, suffix, [ghostCompletionCache], ResultType.Cache);
@@ -158,6 +164,13 @@ export class GhostTextComputer {
                 };
                 const processed = this._postProcessChoiceInContext(choice, document, position);
                 const suffixCoverage = this._calcSuffixCoverage(processed.text, suffix);
+
+                // Reject if the model reproduced chat editing markup
+                if (containsChatMarkup(processed.text)) {
+                    this._log.info(`[GHOST] SKIP — async reuse contains chat editing markup`);
+                    return undefined;
+                }
+
                 this._log.info(`[GHOST] ASYNC_REUSE result=${processed.text.length}ch total=${Date.now() - t0}ms`);
                 const ghostCompletion = this._toGhostCompletion(processed, document, position, isMiddleOfTheLine);
                 this._currentGhostText.setGhostText(prefix, suffix, [ghostCompletion], ResultType.Async);
@@ -330,18 +343,18 @@ export class GhostTextComputer {
             this._log.info(`[GHOST] RESULT resultType=Network final=${processed.text.length}ch total=${Date.now() - t0}ms`);
             this._log.debug(`\n`+ processed.text);
 
+            // Step 13.5: Reject if the model reproduced chat editing markup
+            if (containsChatMarkup(processed.text)) {
+                this._log.info(`[GHOST] SKIP — result contains chat editing markup`);
+                return undefined;
+            }
+
             // Step 14: Cache & return
             const choices: CompletionChoice[] = [{
                 text: processed.text,
                 finishReason: asyncResult.finishReason,
             }];
             this._cache.append(prefix, suffix, choices[0]);
-
-            // Step 13.5: Reject if the model reproduced chat editing markup
-            if (containsChatMarkup(processed.text)) {
-                this._log.info(`[GHOST] SKIP — result contains chat editing markup`);
-                return undefined;
-            }
 
             // Step 13.5: Build GhostCompletion
             const ghostCompletion = this._toGhostCompletion(processed, document, position, isMiddleOfTheLine);

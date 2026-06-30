@@ -15,7 +15,7 @@ import { EditFilterChain } from '../response/editFilterChain';
 import { NesHistoryTracker } from './nesHistoryTracker';
 import { IContextBuilderService } from '../../context/contextBuilderService';
 import { Deferred } from '../../../common/async';
-import { notifyCancelled, waitForDebounce } from '../../../common/requestDebounce';
+import { notifyCancelled, waitForDebounce, getLastCancelledTime } from '../../../common/requestDebounce';
 import { containsChatMarkup } from '../../../common/chatMarkup';
 
 export interface NesExecutionResult {
@@ -207,13 +207,17 @@ export class NesWorkflow {
             }, this._config.responseTimeout);
         });
 
-        // Debounce (shared timer with GHOST).
-        // Skip the wait on the first call (timer starts fresh).
-        const ok = await waitForDebounce(this._config.debounceTimeout, abortController.signal);
-        if (!ok) {
-            this._log.info(`[NES]  SKIP — debounce aborted`);
-            return { editResult: undefined };
+        // Debounce (shared timer with GHOST) with fresh-burst optimization.
+        const sinceLastCancel = Date.now() - getLastCancelledTime();
+        const isFreshBurst = getLastCancelledTime() === 0 || sinceLastCancel >= this._config.debounceTimeout * 2;
+        if (!isFreshBurst) {
+            const ok = await waitForDebounce(this._config.debounceTimeout, abortController.signal);
+            if (!ok) {
+                this._log.info(`[NES]  SKIP — debounce aborted`);
+                return { editResult: undefined };
+            }
         }
+        this._log.debug(`[NES]  debounce fresh_burst=${isFreshBurst} timeout=${this._config.debounceTimeout}ms`);
 
         this._log.debug(`[NES]  endpoint=${endpoint} model=${this._config.model} max_tokens=${this._config.maxOutputTokens}`);
 
@@ -335,6 +339,12 @@ export class NesWorkflow {
                 parsedLines, document, position, undefined,
                 this._config.suffixOverlapThreshold, this._config.suffixOverlapType, this._log
             );
+
+            // Step 6.5: Reject if the model reproduced chat editing markup
+            if (containsChatMarkup(result.edit) || containsChatMarkup(result.fullEditText)) {
+                this._log.info(`[NES]  SKIP — result contains chat editing markup`);
+                return { editResult: undefined, promptPieces: promptAssembly.promptPieces };
+            }
 
             // Step 7: Cache result
             const docId = DocumentId.create(document.uri.toString());
