@@ -99,6 +99,11 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('cc-completion.setNesApiKey', () => setApiKeyCommand(secrets, 'nes')),
         vscode.commands.registerCommand('cc-completion.clearGhostApiKey', () => clearApiKeyCommand(secrets, 'ghost')),
         vscode.commands.registerCommand('cc-completion.clearNesApiKey', () => clearApiKeyCommand(secrets, 'nes')),
+        vscode.commands.registerCommand('cc-completion.toggleLogging', () => {
+            logService.enabled = !logService.enabled;
+            const status = logService.enabled ? 'enabled' : 'disabled';
+            vscode.window.showInformationMessage(`CC Completion logging ${status}`);
+        }),
     );
 
     // Register LLM adapters

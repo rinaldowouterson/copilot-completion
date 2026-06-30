@@ -58,6 +58,11 @@
         "command": "cc-completion.clearNesApiKey",
         "title": "CC Completion: Clear NES API Key",
         "category": "CC Completion"
+      },
+      {
+        "command": "cc-completion.toggleLogging",
+        "title": "CC Completion: Toggle Output Logging",
+        "category": "CC Completion"
       }
     ],
     "configuration": {
