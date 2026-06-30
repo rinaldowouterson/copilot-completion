@@ -10,6 +10,8 @@ export interface ILogService {
     error(message: string): void;
     debug(message: string): void;
     show(): void;
+    /** Clear the output channel. Call on activation to avoid stale log clutter. */
+    clear(): void;
 }
 
 export class LogService implements ILogService {
@@ -25,4 +27,5 @@ export class LogService implements ILogService {
     error(message: string): void { this._channel.error(message); }
     debug(message: string): void { this._channel.debug(message); }
     show(): void { this._channel.show(); }
+    clear(): void { this._channel.clear(); }
 }

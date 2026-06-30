@@ -36,6 +36,7 @@ import { ContextBuilderService } from './completions/context/contextBuilderServi
 
 export function activate(context: vscode.ExtensionContext) {
     const logService = new LogService();
+    logService.clear();
     logService.info('CC Completion activating...');
 
     // Initialize WASM path for tree-sitter
