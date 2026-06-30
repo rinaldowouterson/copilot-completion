@@ -14,8 +14,13 @@ suite('GhostPromptFactory', () => {
             diagnostics: [],
             recentEdits: [],
         });
-        assert.ok(result.includes('<|fim_prefix|>function hello() {'));
-        assert.ok(result.includes('<|fim_suffix|>}'));
+        // Context is injected between the tag and the prefix/suffix content
+        assert.ok(result.includes('// language: javascript'));
+        assert.ok(result.includes('function hello() {'));
+        assert.ok(result.includes('<|fim_prefix|>'));
+        // Suffix content is on a new line after the tag
+        assert.ok(result.includes('<|fim_suffix|>'));
+        assert.ok(result.includes('}'));
         assert.ok(result.includes('<|fim_middle|>'));
     });
 

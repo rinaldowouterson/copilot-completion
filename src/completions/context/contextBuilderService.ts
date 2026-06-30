@@ -198,81 +198,70 @@ export class ContextBuilderService implements IContextBuilderService {
     }
 
     /**
-     * Resolve import statements to their target files via the LSP document link provider.
+     * Resolve relative import statements to their target files using file-system lookups.
      *
-     * For each resolved workspace-local target, fetches its DocumentSymbol tree
-     * (via the per-file LRU cache) and extracts exported symbols.
+     * Extracts import specifiers from the source text (e.g. `'./Button'`, `'../utils'`),
+     * resolves them relative to the source file's directory, tries common extensions,
+     * and fetches each target's exported symbols via the per-file LRU cache.
+     *
+     * Only follows relative imports (`./` and `../`) — package imports (`react`, `lodash`)
+     * and absolute imports are skipped.
      *
      * Limited to 5 unique targets to keep prompt size bounded.
-     * Skips non-file targets (https:, node_modules outside workspace, etc.).
      */
     private async _resolveImportTargets(
         sourceUri: vscode.Uri,
-        _sourceText: string,
+        sourceText: string,
     ): Promise<ImportResolution[]> {
         const startTime = Date.now();
         const resolved: ImportResolution[] = [];
         const seen = new Set<string>();
-        const workspaceFolders = vscode.workspace.workspaceFolders;
 
-        try {
-            const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
-                'vscode.executeDocumentLinkProvider',
-                sourceUri,
-            );
+        const specifiers = extractRelativeImportSpecifiers(sourceText);
+        if (specifiers.length === 0) return [];
 
-            if (!links || links.length === 0) {
-                return [];
-            }
+        const sourceDir = sourceUri.fsPath ? sourceUri.fsPath.substring(0, sourceUri.fsPath.lastIndexOf('/')) : '';
 
-            for (const link of links) {
-                if (resolved.length >= 5) break; // cap at 5
+        for (const specifier of specifiers) {
+            if (resolved.length >= 5) break;
+            if (seen.has(specifier)) continue;
+            seen.add(specifier);
 
-                const target = link.target;
-                if (!target) continue;
-                if (target.scheme !== 'file') continue; // skip https://, mailto:, etc.
+            const targetUri = await resolveSpecifierToUri(specifier, sourceDir, sourceUri.scheme);
+            if (!targetUri) continue;
 
-                const targetUriStr = target.toString();
-                if (seen.has(targetUriStr)) continue;
-                seen.add(targetUriStr);
+            const targetUriStr = targetUri.toString();
+            if (seen.has(targetUriStr)) continue;
+            seen.add(targetUriStr);
 
-                // Skip files outside workspace (e.g. node_modules resolved outside)
-                if (workspaceFolders && !workspaceFolders.some(f => targetUriStr.startsWith(f.uri.toString()))) {
-                    continue;
+            // Skip the source file itself
+            if (targetUriStr === sourceUri.toString()) continue;
+
+            try {
+                const targetDoc = await vscode.workspace.openTextDocument(targetUri);
+                const targetKey = targetDoc.uri.toString();
+
+                let symbols = this._cache.get(targetKey);
+                if (!symbols || symbols.lineCount !== targetDoc.lineCount) {
+                    const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                        'vscode.executeDocumentSymbolProvider',
+                        targetDoc.uri,
+                    );
+                    symbols = {
+                        symbols: rawSymbols ?? [],
+                        lineCount: targetDoc.lineCount,
+                    };
+                    this._cache.set(targetKey, symbols);
                 }
 
-                // Skip the source file itself
-                if (targetUriStr === sourceUri.toString()) continue;
-
-                try {
-                    // Open the target document and fetch its symbols (hits LRU cache)
-                    const targetDoc = await vscode.workspace.openTextDocument(target);
-                    const targetUri = targetDoc.uri.toString();
-
-                    let symbols = this._cache.get(targetUri);
-                    if (!symbols || symbols.lineCount !== targetDoc.lineCount) {
-                        const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-                            'vscode.executeDocumentSymbolProvider',
-                            targetDoc.uri,
-                        );
-                        symbols = {
-                            symbols: rawSymbols ?? [],
-                            lineCount: targetDoc.lineCount,
-                        };
-                        this._cache.set(targetUri, symbols);
-                    }
-
-                    const exports = extractFileExports(symbols.symbols, targetDoc.languageId);
-                    if (exports.length > 0) {
-                        resolved.push({ uri: targetUriStr, exports });
-                    }
-                } catch {
-                    // File might be binary, deleted, or inaccessible — skip silently
-                    continue;
+                const exports = extractFileExports(symbols.symbols, targetDoc.languageId);
+                if (exports.length > 0) {
+                    resolved.push({ uri: targetUriStr, exports });
                 }
+            } catch {
+                // File not found or inaccessible — skip
+                continue;
             }
-        } catch {
-            // Document link provider not available for this language — silent
         }
 
         if (resolved.length > 0) {
@@ -280,6 +269,112 @@ export class ContextBuilderService implements IContextBuilderService {
         }
         return resolved;
     }
+}
+
+/**
+ * Extract relative import specifiers from source text.
+ *
+ * Finds `from '...'` and `require('...')` patterns where the specifier starts
+ * with `./` or `../`. This is a simple character-level scan — no regex AST.
+ *
+ * @internal Exported for unit testing only.
+ */
+export function extractRelativeImportSpecifiers(text: string): string[] {
+    const specifiers: string[] = [];
+    const seen = new Set<string>();
+    let i = 0;
+
+    while (i < text.length) {
+        // Look for `from` or `require` keyword
+        const fromIdx = text.indexOf('from', i);
+        const requireIdx = text.indexOf('require', i);
+        let keywordIdx = -1;
+
+        if (fromIdx >= 0 && (requireIdx < 0 || fromIdx < requireIdx)) {
+            keywordIdx = fromIdx + 4; // past 'from'
+        } else if (requireIdx >= 0) {
+            keywordIdx = requireIdx + 7; // past 'require'
+        } else {
+            break; // no more imports
+        }
+
+        // Find the opening quote after the keyword
+        const quoteStart = text.indexOf('\'', keywordIdx);
+        const dquoteStart = text.indexOf('"', keywordIdx);
+        let quoteChar: string | null = null;
+        let specStart = -1;
+
+        if (quoteStart >= 0 && (dquoteStart < 0 || quoteStart < dquoteStart)) {
+            quoteChar = '\'';
+            specStart = quoteStart + 1;
+        } else if (dquoteStart >= 0) {
+            quoteChar = '"';
+            specStart = dquoteStart + 1;
+        }
+
+        if (quoteChar && specStart >= 0) {
+            const specEnd = text.indexOf(quoteChar, specStart);
+            if (specEnd > specStart) {
+                const specifier = text.slice(specStart, specEnd);
+                // Only follow relative imports
+                if ((specifier.startsWith('./') || specifier.startsWith('../')) && !seen.has(specifier)) {
+                    seen.add(specifier);
+                    specifiers.push(specifier);
+                }
+                i = specEnd + 1;
+                continue;
+            }
+        }
+        // Move past the keyword to avoid infinite loop
+        i = Math.max(fromIdx >= 0 ? fromIdx + 1 : 0, requireIdx >= 0 ? requireIdx + 1 : 0) + 1;
+    }
+
+    return specifiers;
+}
+
+/**
+ * Resolve a relative import specifier to a file URI, trying common extensions.
+ *
+ * Order: .ts, .tsx, .js, .jsx, .mjs, .cjs, /index.ts, /index.js
+ */
+/** @internal Exported for unit testing only. */
+export async function resolveSpecifierToUri(specifier: string, sourceDir: string, scheme: string): Promise<vscode.Uri | undefined> {
+    const extensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    const indexVariants = extensions.map(e => `/index${e}`);
+
+    const candidates = [
+        ...extensions.map(ext => specifier + ext),
+        ...indexVariants.map(idx => specifier + idx),
+        specifier, // also try as-is (might be a directory with its own resolution)
+    ];
+
+    for (const candidate of candidates) {
+        const resolvedPath = sourceDir + '/' + candidate;
+        // Normalize the path (remove ./ and ../)
+        const normalized = normalizePath(resolvedPath);
+        if (!normalized) continue;
+        try {
+            const uri = vscode.Uri.file(normalized).with({ scheme });
+            await vscode.workspace.fs.stat(uri);
+            return uri; // file exists
+        } catch {
+            continue;
+        }
+    }
+    return undefined;
+}
+
+/** Normalize a file path: resolve . and .. segments. Preserves leading slash. */
+export function normalizePath(p: string): string {
+    const isAbsolute = p.startsWith('/');
+    const parts = p.split('/');
+    const result: string[] = [];
+    for (const part of parts) {
+        if (part === '.' || part === '') continue;
+        if (part === '..') { if (result.length > 0) result.pop(); }
+        else result.push(part);
+    }
+    return (isAbsolute ? '/' : '') + result.join('/');
 }
 
 /** Extract top-level symbols exported by the file. */
