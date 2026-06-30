@@ -5,11 +5,12 @@
  * The timer is shared: a keystroke that cancels a GHOST request also resets
  * the debounce for NES, and vice versa.
  *
- * Module-level state lives here so both pipelines share the same `lastCancelledTime`.
+ * Only `lastCancelledTime` is shared between pipelines. Each call to
+ * `waitForDebounce` owns its own timeout ID, so GHOST and NES never
+ * clear each other's pending timers.
  */
 
 let lastCancelledTime = 0;
-let lastTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Wait until `debounceMs` ms have elapsed since the last user keystroke.
@@ -32,8 +33,7 @@ export function waitForDebounce(
             if (elapsed >= debounceMs) {
                 resolve(true);
             } else {
-                if (lastTimeoutId) clearTimeout(lastTimeoutId);
-                lastTimeoutId = setTimeout(check, debounceMs - elapsed);
+                setTimeout(check, debounceMs - elapsed);
             }
         };
         check();
