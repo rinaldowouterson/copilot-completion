@@ -215,16 +215,30 @@ const msg = 'from the heart';`;
         assert.deepStrictEqual(extractRelativeImportSpecifiers(text, 'typescript'), []);
     });
 
+    test('multiple imports on the same line are all found', () => {
+        // Some minifiers bundle multiple imports on one line.
+        const text = `import { X } from './foo'; import { Y } from './bar';`;
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        assert.deepStrictEqual(specs, ['./foo', './bar']);
+    });
+
+    test('require and from on the same line', () => {
+        const text = `const a = require('./a'); import { b } from './b';`;
+        const specs = extractRelativeImportSpecifiers(text, 'typescript');
+        // Both specifiers are found; order depends on pattern-table ordering
+        // (from is checked before require) — verify set equality
+        assert.strictEqual(specs.length, 2);
+        assert.ok(specs.includes('./a'));
+        assert.ok(specs.includes('./b'));
+    });
+
     test('import specifier spans multiple lines (line continuation)', () => {
         // TypeScript doesn't support multi-line import specifiers, but just in case
         const text = `import { X } from './\nfoo';`; // broken across lines
         const specs = extractRelativeImportSpecifiers(text, 'typescript');
-        // The scan finds the quote after 'from ' and looks for the closing quote.
-        // './\nfoo' has a newline in the middle. indexOf("'") finds the first
-        // single quote after the opening quote — that's the one on the next line.
-        // So it would find './\nfoo' as the specifier, which starts with ./
-        // This is an edge case — the import is malformed but the scanner doesn't crash.
-        assert.ok(specs.length === 0 || specs[0] !== undefined);
+        // The line-by-line scanner sees './ on line 1 (no closing quote → skip)
+        // and ' on line 2 (no keyword → skip). Both yield undefined.
+        assert.deepStrictEqual(specs, []);
     });
 
     test('very long single-line document completes quickly', () => {

@@ -293,33 +293,36 @@ export function extractRelativeImportSpecifiers(text: string, languageId: string
     const patterns = buildPatternsForLanguage(languageId);
     if (patterns.length === 0) return [];
 
-    // Single pass: scan line by line. For each line, check if it contains any
-    // import keyword. This avoids O(n²) from calling indexOf() N times over
-    // the full remaining text.
+    // Single pass: scan line by line. For each line, find ALL keyword occurrences.
+    // This avoids O(n²) from calling indexOf() over the full remaining text.
     const lines = text.split('\n');
     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
         const line = lines[lineIdx];
         if (!line) continue;
 
-        // Check each pattern keyword against this line
+        // Scan the line for each pattern, then for multiple occurrences of the same
+        // pattern (e.g. two `from` imports on one line).
         for (const [keyword, advance] of patterns) {
-            const kwIdx = line.indexOf(keyword);
-            if (kwIdx < 0) continue;
+            let searchPos = 0;
+            while (searchPos < line.length) {
+                const kwIdx = line.indexOf(keyword, searchPos);
+                if (kwIdx < 0) break;
 
-            const result = extractSpecifierFromMatch(line, keyword, advance, kwIdx, languageId);
-            if (!result) continue;
-
-            const { specifier, isQuotedInclude } = result;
-            if (specifier && !seen.has(specifier)) {
-                const isRelativePath = specifier.startsWith('./') || specifier.startsWith('../');
-                const isRelativePython = languageId === 'python' && specifier.startsWith('.');
-                if (isRelativePath || isRelativePython || isQuotedInclude) {
-                    seen.add(specifier);
-                    specifiers.push(specifier);
+                const result = extractSpecifierFromMatch(line, keyword, advance, kwIdx, languageId);
+                if (result) {
+                    const { specifier, isQuotedInclude } = result;
+                    if (specifier && !seen.has(specifier)) {
+                        const isRelativePath = specifier.startsWith('./') || specifier.startsWith('../');
+                        const isRelativePython = languageId === 'python' && specifier.startsWith('.');
+                        if (isRelativePath || isRelativePython || isQuotedInclude) {
+                            seen.add(specifier);
+                            specifiers.push(specifier);
+                        }
+                    }
                 }
+                // Advance past this keyword to find the next one on the same line
+                searchPos = kwIdx + 1;
             }
-            // Found a keyword on this line — no need to check other patterns
-            break;
         }
     }
 
