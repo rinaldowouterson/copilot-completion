@@ -77,6 +77,83 @@ async function removeFile(uri: vscode.Uri): Promise<void> {
 }
 
 // ──────────────────────────────────────────────────────────────
+//  Structured assertion logger
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Wraps Node's assert with structured logging so every assertion
+ * emits expected vs actual to the output channel — not just on failure.
+ */
+class AssertLogger {
+    private _checks = 0;
+
+    /** Log a named value (not an assertion, just data). */
+    value(label: string, val: unknown): void {
+        const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
+        console.log(`  [data] ${label}: ${str}`);
+    }
+
+    /** Assert `ok` is truthy, log ✓ or ✗. */
+    ok(ok: boolean, label: string, actual?: unknown): void {
+        this._checks++;
+        if (ok) {
+            console.log(`  ✓ ${label}`);
+        } else {
+            const hint = actual !== undefined ? ` (actual: ${JSON.stringify(actual)})` : '';
+            console.log(`  ✗ ${label}${hint}`);
+            assert.ok(ok, `${label}${hint}`);
+        }
+    }
+
+    /** Assert `actual === expected`, log both. */
+    equal<T>(actual: T, expected: T, label: string): void {
+        this._checks++;
+        if (actual === expected) {
+            console.log(`  ✓ ${label}: ${JSON.stringify(expected)}`);
+        } else {
+            console.log(`  ✗ ${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+            assert.strictEqual(actual, expected, label);
+        }
+    }
+
+    /** Assert `actual` is contained in `expected` (string includes). */
+    includes(actual: string, expectedSubstr: string, label: string): void {
+        this._checks++;
+        if (actual.includes(expectedSubstr)) {
+            console.log(`  ✓ ${label}: contains "${expectedSubstr}"`);
+        } else {
+            console.log(`  ✗ ${label}: expected "${actual}" to contain "${expectedSubstr}"`);
+            assert.ok(actual.includes(expectedSubstr), label);
+        }
+    }
+
+    /** Assert array contains a value. */
+    arrayContains<T>(arr: T[], item: T, label: string): void {
+        this._checks++;
+        if (arr.includes(item)) {
+            console.log(`  ✓ ${label}: found "${item}" in [${arr.join(', ')}]`);
+        } else {
+            console.log(`  ✗ ${label}: expected [${arr.join(', ')}] to contain "${item}"`);
+            assert.ok(arr.includes(item), label);
+        }
+    }
+
+    /** Assert typeof matches. */
+    typeOf(val: unknown, type: string, label: string): void {
+        this._checks++;
+        const actualType = typeof val;
+        if (actualType === type) {
+            console.log(`  ✓ ${label}: ${type}`);
+        } else {
+            console.log(`  ✗ ${label}: expected ${type}, got ${actualType}`);
+            assert.strictEqual(actualType, type, label);
+        }
+    }
+
+    get checkCount(): number { return this._checks; }
+}
+
+// ──────────────────────────────────────────────────────────────
 //  Test registry
 // ──────────────────────────────────────────────────────────────
 
@@ -86,9 +163,9 @@ interface TestResult {
     error?: string;
 }
 
-const tests: Array<{ name: string; fn: () => Promise<void> }> = [];
+const tests: Array<{ name: string; fn: (ctx: AssertLogger) => Promise<void> }> = [];
 
-function test(name: string, fn: () => Promise<void>): void {
+function test(name: string, fn: (ctx: AssertLogger) => Promise<void>): void {
     tests.push({ name, fn });
 }
 
@@ -96,39 +173,34 @@ function test(name: string, fn: () => Promise<void>): void {
 //  Tests
 // ──────────────────────────────────────────────────────────────
 
-test('LSP: TypeScript built-in TS server responds with symbols', async () => {
+test('LSP: TypeScript built-in TS server responds with symbols', async (ctx) => {
     const uri = tmpUri('.ts', 'lsp_ts');
     await writeFile(uri, 'export function greet(name: string): string {\n  return `hello ${name}`;\n}\n');
     await openDocument(uri);
     const ok = await waitForLsp(uri, 15_000);
-    assert.ok(ok, 'TypeScript LSP did not return symbols within 15s');
+    ctx.ok(ok, 'TypeScript LSP returns symbols within 15s', ok);
     await removeFile(uri);
 });
 
-test('LSP: Python (Pylance) responds with symbols', async () => {
+test('LSP: Python (Pylance) responds with symbols', async (ctx) => {
     const uri = tmpUri('.py', 'lsp_py');
     await writeFile(uri, 'def greet(name: str) -> str:\n    return f"hello {name}"\n');
     await openDocument(uri);
     const ok = await waitForLsp(uri, 15_000);
-    // Python LSP may not be installed — assert pass regardless, but log
-    if (!ok) {
-        console.warn('[diagnostics] Python LSP not detected (Pylance may not be installed)');
-    }
+    ctx.ok(ok, 'Python LSP returns symbols within 15s (may be absent)', ok);
     await removeFile(uri);
 });
 
-test('LSP: Go symbols (if Go extension installed)', async () => {
+test('LSP: Go symbols (if Go extension installed)', async (ctx) => {
     const uri = tmpUri('.go', 'lsp_go');
     await writeFile(uri, 'package main\n\nfunc greet(name string) string {\n\treturn "hello " + name\n}\n');
     await openDocument(uri);
     const ok = await waitForLsp(uri, 10_000);
-    if (!ok) {
-        console.warn('[diagnostics] Go LSP not detected (golang.go may not be installed)');
-    }
+    ctx.ok(ok, 'Go LSP returns symbols (may be absent)', ok);
     await removeFile(uri);
 });
 
-test('Phase A: TypeScript import resolution with relativePath', async () => {
+test('Phase A: TypeScript import resolution with relativePath', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -161,24 +233,27 @@ test('Phase A: TypeScript import resolution with relativePath', async () => {
     const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 25));
 
     // Phase A contract: at least one import resolution with relativePath
-    assert.ok(Array.isArray(bundle.importResolutions), 'importResolutions must be array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.value('importResolutions count', bundle.importResolutions.length);
     if (bundle.importResolutions.length > 0) {
         const imp = bundle.importResolutions[0];
-        assert.ok(typeof imp.relativePath === 'string', 'relativePath must be string');
-        assert.ok(imp.relativePath.startsWith('./'), `relativePath must start with ./, got ${imp.relativePath}`);
+        ctx.typeOf(imp.relativePath, 'string', 'relativePath type');
+        ctx.value('relativePath value', imp.relativePath);
+        ctx.ok(imp.relativePath.startsWith('./'), 'relativePath starts with ./', imp.relativePath);
     }
 
     // Phase B: statementEndLine should be a number
-    assert.ok(typeof bundle.statementEndLine === 'number', 'statementEndLine must be number');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
 
     // Phase D: languageId is set
-    assert.strictEqual(bundle.languageId, 'typescript');
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
 
     await removeFile(targetUri);
     await removeFile(sourceUri);
 });
 
-test('Phase A: relativePath is mandatory on every ImportResolution', async () => {
+test('Phase A: relativePath is mandatory on every ImportResolution', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -197,17 +272,19 @@ test('Phase A: relativePath is mandatory on every ImportResolution', async () =>
     const doc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
+    ctx.value('importResolutions count', bundle.importResolutions.length);
     for (const imp of bundle.importResolutions) {
-        assert.ok(typeof imp.relativePath === 'string', 'relativePath must be string');
-        assert.ok(imp.relativePath.startsWith('./') || imp.relativePath.startsWith('../'),
-            `relativePath must start with ./ or ../, got ${imp.relativePath}`);
+        ctx.typeOf(imp.relativePath, 'string', 'relativePath type');
+        ctx.value('relativePath', imp.relativePath);
+        ctx.ok(imp.relativePath.startsWith('./') || imp.relativePath.startsWith('../'),
+            'relativePath starts with ./ or ../', imp.relativePath);
     }
 
     await removeFile(targetUri);
     await removeFile(sourceUri);
 });
 
-test('Phase B: statement end detected via LSP', async () => {
+test('Phase B: statement end detected via LSP', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -221,16 +298,15 @@ test('Phase B: statement end detected via LSP', async () => {
     // Cursor at line 0, column 6 (inside "const x = 42")
     const bundle = await builder.gather(doc, new vscode.Position(0, 6));
 
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine should be a number, got ${typeof bundle.statementEndLine}`);
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine value', bundle.statementEndLine);
     // For "const x = 42;\n" on line 0, statement should end on line 0 or later
-    assert.ok(bundle.statementEndLine! >= 0,
-        `statementEndLine should be >= 0, got ${bundle.statementEndLine}`);
+    ctx.ok(bundle.statementEndLine! >= 0, 'statementEndLine >= 0', bundle.statementEndLine);
 
     await removeFile(uri);
 });
 
-test('Phase H: missingImports is always an array', async () => {
+test('Phase H: missingImports is always an array', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -243,13 +319,13 @@ test('Phase H: missingImports is always an array', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
-    assert.ok(Array.isArray(bundle.missingImports),
-        `missingImports must be an array, got ${typeof bundle.missingImports}`);
+    ctx.ok(Array.isArray(bundle.missingImports), 'missingImports is array');
+    ctx.value('missingImports count', bundle.missingImports.length);
 
     await removeFile(uri);
 });
 
-test('Phase G: superTypes is undefined for non-class cursor', async () => {
+test('Phase G: superTypes is undefined for non-class cursor', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -263,13 +339,12 @@ test('Phase G: superTypes is undefined for non-class cursor', async () => {
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
     // Cursor is on a function, not a class — superTypes should be undefined
-    assert.strictEqual(bundle.superTypes, undefined,
-        'superTypes should be undefined for non-class cursor');
+    ctx.equal(bundle.superTypes, undefined, 'superTypes undefined for non-class cursor');
 
     await removeFile(uri);
 });
 
-test('Bundle: JSON-serializable and contains required fields', async () => {
+test('Bundle: JSON-serializable and contains required fields', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -283,17 +358,20 @@ test('Bundle: JSON-serializable and contains required fields', async () => {
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
     const json = JSON.stringify(bundle);
-    assert.ok(json.length > 0, 'Bundle must serialize to non-empty JSON');
+    ctx.ok(json.length > 0, 'Bundle serializes to non-empty JSON');
+    ctx.value('JSON length', json.length);
 
     // Core field types
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.strictEqual(bundle.languageId, 'typescript');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
+    ctx.value('export count', bundle.fileExports.length);
+    ctx.value('export names', bundle.fileExports.map(e => e.name));
 
     await removeFile(uri);
 });
 
-test('languageSyntax matches TypeScript rules', async () => {
+test('languageSyntax matches TypeScript rules', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -306,11 +384,13 @@ test('languageSyntax matches TypeScript rules', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
-    assert.strictEqual(bundle.languageId, 'typescript');
-    assert.strictEqual(bundle.languageSyntax.comment, '//');
-    assert.strictEqual(bundle.languageSyntax.semicolons, true);
-    assert.ok(Array.isArray(bundle.languageSyntax.brackets));
-    assert.ok(Array.isArray(bundle.languageSyntax.continuationOperators));
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
+    ctx.equal(bundle.languageSyntax.comment, '//', 'comment style');
+    ctx.equal(bundle.languageSyntax.semicolons, true, 'semicolons required');
+    ctx.ok(Array.isArray(bundle.languageSyntax.brackets), 'brackets is array');
+    ctx.ok(Array.isArray(bundle.languageSyntax.continuationOperators), 'continuationOperators is array');
+    ctx.value('brackets', bundle.languageSyntax.brackets);
+    ctx.value('continuation operators', bundle.languageSyntax.continuationOperators);
 
     await removeFile(uri);
 });
@@ -379,7 +459,7 @@ test('LSP: Lua (sumneko.lua) responds with symbols', async () => {
 //  Phase C: hover enrichment
 // ──────────────────────────────────────────────────────────────
 
-test('Phase C: hover enrichment provides type signatures', async () => {
+test('Phase C: hover enrichment provides type signatures', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -409,15 +489,11 @@ test('Phase C: hover enrichment provides type signatures', async () => {
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 12));
 
-    // Phase C: if the LSP can resolve imports, we should have export types
+    ctx.value('fileExports count', bundle.fileExports.length);
     if (bundle.fileExports.length > 0) {
-        // fileExports should have `type` field populated by hover enrichment
         const hasTypes = bundle.fileExports.some(e => e.type !== undefined);
-        // This is a soft assertion — hover enrichment requires both LSP import
-        // resolution AND hover provider support. Log but don't fail.
-        if (!hasTypes) {
-            console.warn('[diagnostics] Phase C: no hover type signatures found (LSP may not support hover for this context)');
-        }
+        ctx.value('exports with type sigs', bundle.fileExports.filter(e => e.type !== undefined).map(e => `${e.name}:${e.type}`));
+        ctx.ok(hasTypes, 'some exports have hover type signatures (soft)', hasTypes);
     }
 
     await removeFile(targetUri);
@@ -428,7 +504,7 @@ test('Phase C: hover enrichment provides type signatures', async () => {
 //  Phase G: class hierarchy (OOP)
 // ──────────────────────────────────────────────────────────────
 
-test('Phase G: superTypes resolved for class inheritance', async () => {
+test('Phase G: superTypes resolved for class inheritance', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -448,14 +524,12 @@ test('Phase G: superTypes resolved for class inheritance', async () => {
     // Cursor on line 1 (class Derived), column 6
     const bundle = await builder.gather(doc, new vscode.Position(1, 6));
 
+    ctx.value('superTypes', bundle.superTypes ? bundle.superTypes.map(s => s.name) : 'undefined');
+
     // Phase G: if LSP supports type hierarchy, superTypes may be populated.
-    // This is a soft assertion — some LSPs don't support TypeHierarchy.
     if (bundle.superTypes && bundle.superTypes.length > 0) {
         const names = bundle.superTypes.map(s => s.name);
-        assert.ok(names.includes('Base'),
-            `Expected superType "Base" in [${names.join(', ')}]`);
-    } else {
-        console.warn('[diagnostics] Phase G: no superTypes returned (LSP may not support type hierarchy for TypeScript)');
+        ctx.arrayContains(names, 'Base', 'superTypes contains Base');
     }
 
     await removeFile(uri);
@@ -465,7 +539,7 @@ test('Phase G: superTypes resolved for class inheritance', async () => {
 //  Multi-language bundle shapes
 // ──────────────────────────────────────────────────────────────
 
-test('Bundle: Python function export shape', async () => {
+test('Bundle: Python function export shape', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -478,18 +552,20 @@ test('Bundle: Python function export shape', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 5));
 
-    assert.strictEqual(bundle.languageId, 'python');
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.ok(typeof bundle.statementEndLine === 'number');
+    ctx.equal(bundle.languageId, 'python', 'languageId');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('fileExports', bundle.fileExports.map(e => e.name));
     // Python uses # for comments and has no semicolons
-    assert.strictEqual(bundle.languageSyntax.comment, '#');
-    assert.strictEqual(bundle.languageSyntax.semicolons, false);
+    ctx.equal(bundle.languageSyntax.comment, '#', 'comment style');
+    ctx.equal(bundle.languageSyntax.semicolons, false, 'semicolons not required');
 
     await removeFile(uri);
 });
 
-test('Bundle: Rust module export shape', async () => {
+test('Bundle: Rust module export shape', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -506,18 +582,20 @@ test('Bundle: Rust module export shape', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 10));
 
-    assert.strictEqual(bundle.languageId, 'rust');
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.ok(typeof bundle.statementEndLine === 'number');
+    ctx.equal(bundle.languageId, 'rust', 'languageId');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`));
     // Rust uses // and has semicolons
-    assert.strictEqual(bundle.languageSyntax.comment, '//');
-    assert.strictEqual(bundle.languageSyntax.semicolons, true);
+    ctx.equal(bundle.languageSyntax.comment, '//', 'comment style');
+    ctx.equal(bundle.languageSyntax.semicolons, true, 'semicolons required');
 
     await removeFile(uri);
 });
 
-test('Bundle: Go export shape with language routing', async () => {
+test('Bundle: Go export shape with language routing', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -530,12 +608,14 @@ test('Bundle: Go export shape with language routing', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(2, 10));
 
-    assert.strictEqual(bundle.languageId, 'go');
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.ok(typeof bundle.statementEndLine === 'number');
+    ctx.equal(bundle.languageId, 'go', 'languageId');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`));
     // Go uses // and has no semicolons (inserted by formatter)
-    assert.strictEqual(bundle.languageSyntax.comment, '//');
+    ctx.equal(bundle.languageSyntax.comment, '//', 'comment style');
 
     await removeFile(uri);
 });
@@ -544,7 +624,7 @@ test('Bundle: Go export shape with language routing', async () => {
 //  P0/P1 Gap: Resilience & Error Handling
 // ──────────────────────────────────────────────────────────────
 
-test('[P0] Phase A: import from non-existent file returns empty — not crash', async () => {
+test('[P0] Phase A: import from non-existent file returns empty — not crash', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -563,17 +643,16 @@ test('[P0] Phase A: import from non-existent file returns empty — not crash', 
     // This should NOT throw — must return empty importResolutions gracefully
     const bundle = await builder.gather(doc, new vscode.Position(2, 20));
 
-    assert.ok(Array.isArray(bundle.importResolutions),
-        'importResolutions must be array even when target is missing');
-    // May be 0 if LSP can't resolve, or 1+ if it finds something — both OK
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        'statementEndLine must be number even with broken imports');
-    assert.strictEqual(bundle.languageId, 'typescript');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array for missing target');
+    ctx.value('importResolutions count', bundle.importResolutions.length);
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type (heuristic fallback)');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
 
     await removeFile(sourceUri);
 });
 
-test('[P0] Phase A: broken import syntax does not crash gather()', async () => {
+test('[P0] Phase A: broken import syntax does not crash gather()', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -591,16 +670,16 @@ test('[P0] Phase A: broken import syntax does not crash gather()', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(1, 5));
 
-    assert.ok(Array.isArray(bundle.importResolutions),
-        'importResolutions must be array even with broken import syntax');
-    assert.ok(typeof bundle.statementEndLine === 'number');
-    // The regex should skip the malformed line, but the file should still parse
-    assert.strictEqual(bundle.fileExports.length, 0);
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array with broken syntax');
+    ctx.value('importResolutions count', bundle.importResolutions.length);
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.equal(bundle.fileExports.length, 0, 'fileExports empty for malformed file');
 
     await removeFile(uri);
 });
 
-test('[P0] Phase H: actual missing-import detection', async () => {
+test('[P0] Phase H: actual missing-import detection', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -621,16 +700,12 @@ test('[P0] Phase H: actual missing-import detection', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(1, 20));
 
-    assert.ok(Array.isArray(bundle.missingImports),
-        'missingImports must be array');
+    ctx.ok(Array.isArray(bundle.missingImports), 'missingImports is array');
+    ctx.value('missingImports', bundle.missingImports.map(m => m.symbolName));
+
     // If TypeScript LSP is active, it SHOULD detect madeUpFunction as undefined
     const found = bundle.missingImports.find(m => m.symbolName === 'madeUpFunction');
-    if (found) {
-        console.log('[diagnostics] Phase H: detected missing import: madeUpFunction');
-    } else {
-        // This may fail if diagnostics haven't propagated yet — log but don't fail
-        console.warn('[diagnostics] Phase H: missing import NOT detected (diagnostics may need more time)');
-    }
+    ctx.ok(!!found, 'madeUpFunction detected as missing import', found?.symbolName);
 
     await removeFile(uri);
 });
@@ -663,7 +738,7 @@ test('[P1] Phase H: gather() on empty file does not throw', async () => {
     await removeFile(uri);
 });
 
-test('[P1] Phase B: cursor at end of file returns valid statementEndLine', async () => {
+test('[P1] Phase B: cursor at end of file returns valid statementEndLine', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -681,17 +756,16 @@ test('[P1] Phase B: cursor at end of file returns valid statementEndLine', async
     const lastLine = doc.lineCount - 1;
     const bundle = await builder.gather(doc, new vscode.Position(lastLine, 0));
 
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine must be number at EOF, got ${typeof bundle.statementEndLine}`);
-    assert.ok(bundle.statementEndLine! >= lastLine,
-        `statementEndLine (${bundle.statementEndLine}) should be >= cursor line (${lastLine})`);
-
-    console.log(`[diagnostics] EOF cursor: statementEndLine=${bundle.statementEndLine}, lastLine=${lastLine}`);
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type at EOF');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('cursor lastLine', lastLine);
+    ctx.ok(bundle.statementEndLine! >= lastLine,
+        `statementEndLine >= cursor line`, bundle.statementEndLine);
 
     await removeFile(uri);
 });
 
-test('[P1] Phase B: multi-line block statement end', async () => {
+test('[P1] Phase B: multi-line block statement end', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -710,18 +784,16 @@ test('[P1] Phase B: multi-line block statement end', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(1, 7)); // inside the function
 
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine must be number, got ${typeof bundle.statementEndLine}`);
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('enclosingScope', bundle.enclosingScope?.name ?? 'none');
     // Statement on line 1 is 'const a = 1;' — should end on line 1 or later
-    assert.ok(bundle.statementEndLine! >= 1,
-        `statementEndLine (${bundle.statementEndLine}) should be >= 1`);
-
-    console.log(`[diagnostics] Multi-line block: statementEndLine=${bundle.statementEndLine}, enclosingScope=${bundle.enclosingScope?.name ?? 'none'}`);
+    ctx.ok(bundle.statementEndLine! >= 1, 'statementEndLine >= 1', bundle.statementEndLine);
 
     await removeFile(uri);
 });
 
-test('[P1] untitled:Untitled-1 document does not throw in gather()', async () => {
+test('[P1] untitled:Untitled-1 document does not throw in gather()', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -732,17 +804,14 @@ test('[P1] untitled:Untitled-1 document does not throw in gather()', async () =>
 
     const bundle = await builder.gather(doc, new vscode.Position(0, 5));
 
-    assert.ok(Array.isArray(bundle.importResolutions),
-        'importResolutions must be array for untitled docs');
-    assert.strictEqual(bundle.importResolutions.length, 0,
-        'untitled docs should have 0 import resolutions');
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine must be number for untitled docs, got ${typeof bundle.statementEndLine}`);
-
-    console.log(`[diagnostics] Untitled doc: languageId=${bundle.languageId}, statementEndLine=${bundle.statementEndLine}`);
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array for untitled');
+    ctx.equal(bundle.importResolutions.length, 0, 'untitled importResolutions count');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type for untitled');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.value('languageId', bundle.languageId);
 });
 
-test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', async () => {
+test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -764,15 +833,14 @@ test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', asy
     const bundle = await builder.gather(doc, new vscode.Position(3, 10));
 
     // Should not throw — superTypes may be undefined or [] depending on LSP
-    assert.ok(bundle.superTypes === undefined || Array.isArray(bundle.superTypes),
-        `superTypes must be undefined or array, got ${typeof bundle.superTypes}`);
-
-    console.log(`[diagnostics] Python class: superTypes=${bundle.superTypes ? JSON.stringify(bundle.superTypes.map(s => s.name)) : 'undefined'}`);
+    ctx.ok(bundle.superTypes === undefined || Array.isArray(bundle.superTypes),
+        'superTypes is undefined or array', bundle.superTypes);
+    ctx.value('superTypes', bundle.superTypes ? bundle.superTypes.map(s => s.name) : 'undefined');
 
     await removeFile(uri);
 });
 
-test('[P1] Phase C: hover on whitespace returns empty — does not throw', async () => {
+test('[P1] Phase C: hover on whitespace returns empty — does not throw', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -790,15 +858,15 @@ test('[P1] Phase C: hover on whitespace returns empty — does not throw', async
     // Cursor on line 1 (blank line), column 0 — hover returns nothing
     const bundle = await builder.gather(doc, new vscode.Position(1, 0));
 
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(typeof bundle.statementEndLine === 'number');
-
-    console.log(`[diagnostics] Hover on whitespace: fileExports=${bundle.fileExports.length}, statementEndLine=${bundle.statementEndLine}`);
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('fileExports count', bundle.fileExports.length);
+    ctx.value('statementEndLine', bundle.statementEndLine);
 
     await removeFile(uri);
 });
 
-test('[P0] gather() safety net: malformed document never throws', async () => {
+test('[P0] gather() safety net: malformed document never throws', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -813,12 +881,11 @@ test('[P0] gather() safety net: malformed document never throws', async () => {
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
     // Must never throw — should return a minimal valid bundle
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.ok(Array.isArray(bundle.missingImports));
-    assert.strictEqual(bundle.languageId, 'typescript');
-
-    console.log(`[diagnostics] Binary-ish content: threw=false, exports=${bundle.fileExports.length}`);
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.ok(Array.isArray(bundle.missingImports), 'missingImports is array');
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
+    ctx.value('exports', bundle.fileExports.map(e => e.name));
 
     await removeFile(uri);
 });
@@ -1046,10 +1113,11 @@ export async function runAllDiagnostics(
     channel.appendLine('');
 
     for (const t of tests) {
+        const ctx = new AssertLogger();
         try {
-            await t.fn();
+            await t.fn(ctx);
             passed++;
-            channel.appendLine(`  ✓ ${t.name}`);
+            channel.appendLine(`  ✓ ${t.name} (${ctx.checkCount} checks)`);
         } catch (err) {
             failed++;
             const msg = err instanceof Error ? err.message : String(err);
