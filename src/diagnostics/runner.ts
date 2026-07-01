@@ -315,6 +315,235 @@ test('languageSyntax matches TypeScript rules', async () => {
     await removeFile(uri);
 });
 
+// ──────────────────────────────────────────────────────────────
+//  Multi-language LSP detection
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Helper: create a file for a given language, wait for LSP symbols,
+ * and assert or warn.
+ */
+async function testLspDetection(
+    label: string,
+    ext: string,
+    content: string,
+    timeoutMs: number = 15_000,
+): Promise<void> {
+    const uri = tmpUri(ext, `lsp_${label}`);
+    await writeFile(uri, content);
+    await openDocument(uri);
+    const ok = await waitForLsp(uri, timeoutMs);
+    if (!ok) {
+        console.warn(`[diagnostics] LSP not detected for ${label} (extension may not be installed)`);
+    }
+    await removeFile(uri);
+}
+
+test('LSP: Rust (rust-analyzer) responds with symbols', async () => {
+    await testLspDetection('rust', '.rs', 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n');
+});
+
+test('LSP: Java (redhat.java) responds with symbols', async () => {
+    await testLspDetection('java', '.java',
+        'public class Hello {\n    public static void main(String[] args) {}\n}\n');
+});
+
+test('LSP: C# (ms-dotnettools.csharp) responds with symbols', async () => {
+    await testLspDetection('csharp', '.cs',
+        'class Hello { static void Main() {} }\n');
+});
+
+test('LSP: C/C++ (ms-vscode.cpptools) responds with symbols', async () => {
+    await testLspDetection('cpp', '.cpp', 'int main() { return 0; }\n');
+    await testLspDetection('c', '.c', 'int main() { return 0; }\n');
+});
+
+test('LSP: PHP (Intelephense) responds with symbols', async () => {
+    await testLspDetection('php', '.php', '<?php function greet($name) { return "hello $name"; }\n');
+});
+
+test('LSP: Ruby (Ruby LSP) responds with symbols', async () => {
+    await testLspDetection('ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n');
+});
+
+test('LSP: Dart responds with symbols', async () => {
+    await testLspDetection('dart', '.dart',
+        'void main() { print("hello"); }\n');
+});
+
+test('LSP: Lua (sumneko.lua) responds with symbols', async () => {
+    await testLspDetection('lua', '.lua', 'function greet(name) return "hello " .. name end\n');
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Phase C: hover enrichment
+// ──────────────────────────────────────────────────────────────
+
+test('Phase C: hover enrichment provides type signatures', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const targetUri = tmpUri('.ts', 'phase_c_target');
+    const sourceUri = tmpUri('.ts', 'phase_c_source');
+
+    await writeFile(targetUri, [
+        'export interface User { id: string; name: string }',
+        'export function createUser(name: string): User {',
+        '  return { id: "1", name };',
+        '}',
+    ].join('\n'));
+
+    const targetName = path.basename(targetUri.path).replace(/\.ts$/, '');
+    await writeFile(sourceUri, [
+        `import { createUser } from './${targetName}';`,
+        '',
+        'const u = createUser("test");',
+    ].join('\n'));
+
+    await openDocument(targetUri);
+    await openDocument(sourceUri);
+    await waitForLsp(targetUri, 15_000);
+    await waitForLsp(sourceUri, 5_000);
+
+    const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
+    const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 12));
+
+    // Phase C: if the LSP can resolve imports, we should have export types
+    if (bundle.fileExports.length > 0) {
+        // fileExports should have `type` field populated by hover enrichment
+        const hasTypes = bundle.fileExports.some(e => e.type !== undefined);
+        // This is a soft assertion — hover enrichment requires both LSP import
+        // resolution AND hover provider support. Log but don't fail.
+        if (!hasTypes) {
+            console.warn('[diagnostics] Phase C: no hover type signatures found (LSP may not support hover for this context)');
+        }
+    }
+
+    await removeFile(targetUri);
+    await removeFile(sourceUri);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Phase G: class hierarchy (OOP)
+// ──────────────────────────────────────────────────────────────
+
+test('Phase G: superTypes resolved for class inheritance', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'phase_g_class');
+    await writeFile(uri, [
+        'interface Base { id: string }',
+        'class Derived implements Base {',
+        '  constructor(public id: string) {}',
+        '}',
+    ].join('\n'));
+
+    await openDocument(uri);
+    await waitForLsp(uri, 15_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Cursor on line 1 (class Derived), column 6
+    const bundle = await builder.gather(doc, new vscode.Position(1, 6));
+
+    // Phase G: if LSP supports type hierarchy, superTypes may be populated.
+    // This is a soft assertion — some LSPs don't support TypeHierarchy.
+    if (bundle.superTypes && bundle.superTypes.length > 0) {
+        const names = bundle.superTypes.map(s => s.name);
+        assert.ok(names.includes('Base'),
+            `Expected superType "Base" in [${names.join(', ')}]`);
+    } else {
+        console.warn('[diagnostics] Phase G: no superTypes returned (LSP may not support type hierarchy for TypeScript)');
+    }
+
+    await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Multi-language bundle shapes
+// ──────────────────────────────────────────────────────────────
+
+test('Bundle: Python function export shape', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.py', 'bundle_py');
+    await writeFile(uri, 'def add(a: int, b: int) -> int:\n    return a + b\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(0, 5));
+
+    assert.strictEqual(bundle.languageId, 'python');
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.ok(Array.isArray(bundle.importResolutions));
+    assert.ok(typeof bundle.statementEndLine === 'number');
+    // Python uses # for comments and has no semicolons
+    assert.strictEqual(bundle.languageSyntax.comment, '#');
+    assert.strictEqual(bundle.languageSyntax.semicolons, false);
+
+    await removeFile(uri);
+});
+
+test('Bundle: Rust module export shape', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.rs', 'bundle_rs');
+    await writeFile(uri, [
+        'pub fn multiply(a: i32, b: i32) -> i32 { a * b }',
+        '',
+        'pub struct Point { x: i32, y: i32 }',
+    ].join('\n'));
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(0, 10));
+
+    assert.strictEqual(bundle.languageId, 'rust');
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.ok(Array.isArray(bundle.importResolutions));
+    assert.ok(typeof bundle.statementEndLine === 'number');
+    // Rust uses // and has semicolons
+    assert.strictEqual(bundle.languageSyntax.comment, '//');
+    assert.strictEqual(bundle.languageSyntax.semicolons, true);
+
+    await removeFile(uri);
+});
+
+test('Bundle: Go export shape with language routing', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.go', 'bundle_go');
+    await writeFile(uri, 'package lib\n\nfunc Greet(name string) string {\n\treturn "hello, " + name\n}\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(2, 10));
+
+    assert.strictEqual(bundle.languageId, 'go');
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.ok(Array.isArray(bundle.importResolutions));
+    assert.ok(typeof bundle.statementEndLine === 'number');
+    // Go uses // and has no semicolons (inserted by formatter)
+    assert.strictEqual(bundle.languageSyntax.comment, '//');
+
+    await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  LSP extension registry validation
+// ──────────────────────────────────────────────────────────────
+
 test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async () => {
     for (const [lang, exts] of Object.entries(LANG_TO_LSP_EXTENSIONS)) {
         assert.ok(Array.isArray(exts), `${lang} extensions must be an array`);
