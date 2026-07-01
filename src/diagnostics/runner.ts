@@ -25,6 +25,7 @@ import { cleanHoverSignature } from '../completions/context/hoverEnrichment';
 import { flattenWorkspaceEdit } from '../completions/context/autoImport';
 import { buildExportsLine, buildImportLine } from '../completions/ghost/promptFactory';
 import { findStatementEndHeuristic } from '../common/languageSyntax';
+import { resolveRelativePath } from '../completions/context/relativePath';
 import { inferFileKindFromExtension, isBinaryKind } from '../common/fileKind';
 import { TrimCompletionSuffixOverlap } from '../common/suffixOverlapTrim';
 import { TerseBlockTrimmer, VerboseBlockTrimmer } from '../completions/ghost/blockTrimmer';
@@ -36,6 +37,10 @@ import { EmptyEditFilter, NoopEditFilter, WhitespaceOnlyFilter, CommentOnlyFilte
 import { BoundaryMarkerParser, CursorTagStripper, ResponsePipeline } from '../completions/nes/response/responsePipeline';
 import { OffsetRange } from '../completions/nes/stubs/offsetRange';
 import { Result } from '../common/result';
+import { VSCodeGhostConfigProvider } from '../config/ghostConfig';
+import { VSCodeNesConfigProvider } from '../config/nesConfig';
+import { ISecretConfig } from '../config/secretConfig';
+import { InlineSuggestionResolver } from '../completions/nes/core/inlineSuggestionResolver';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -1111,6 +1116,33 @@ test('normalizePath: resolves ./ and ../ segments', async (ctx) => {
     ctx.equal(normalizePath('a/../../b'), 'b', 'going above root resolves to empty prefix');
     ctx.equal(normalizePath('a/b/c'), 'a/b/c', 'no dots, unchanged');
     ctx.value('normalizePath', '5 cases passed');
+});
+
+test('resolveRelativePath: returns ./ or ../ prefixed path', async (ctx) => {
+    const fakeRoot = '/fake/workspace';
+    const src = vscode.Uri.file(`${fakeRoot}/src/foo.ts`);
+    const tgt = vscode.Uri.file(`${fakeRoot}/src/utils/helpers.ts`);
+    const rel = resolveRelativePath(src, tgt);
+    ctx.ok(rel.startsWith('./') || rel.startsWith('../'), 'starts with ./ or ../');
+    ctx.equal(rel, './utils/helpers.ts', 'same-depth parent dir');
+});
+
+test('resolveRelativePath: same directory and parent directory', async (ctx) => {
+    const fakeRoot = '/fake/workspace';
+    const src = vscode.Uri.file(`${fakeRoot}/src/foo.ts`);
+    const tgt = vscode.Uri.file(`${fakeRoot}/src/bar.ts`);
+    ctx.equal(resolveRelativePath(src, tgt), './bar.ts', 'same directory');
+
+    const src2 = vscode.Uri.file(`${fakeRoot}/src/api/foo.ts`);
+    const tgt2 = vscode.Uri.file(`${fakeRoot}/src/utils/helpers.ts`);
+    ctx.equal(resolveRelativePath(src2, tgt2), '../utils/helpers.ts', 'parent directory');
+});
+
+test('resolveRelativePath: always returns non-empty string', async (ctx) => {
+    const src = vscode.Uri.file('/fake/workspace/src/foo.ts');
+    const tgt = vscode.Uri.file('/fake/workspace/src/bar.ts');
+    const rel = resolveRelativePath(src, tgt);
+    ctx.ok(typeof rel === 'string' && rel.length > 0, 'non-empty string');
 });
 
 test('cleanHoverSignature: strips code fences and collapses whitespace', async (ctx) => {
@@ -2301,6 +2333,164 @@ test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async (ctx)
         }
     }
     ctx.value('LSP registry', `${Object.keys(LANG_TO_LSP_EXTENSIONS).length} languages validated`);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Config provider tests
+// ──────────────────────────────────────────────────────────────
+
+function _mockContext(): vscode.ExtensionContext {
+    const state = new Map<string, unknown>();
+    return {
+        workspaceState: {
+            get: <T>(key: string, dflt: T) => (state.has(key) ? state.get(key) : dflt) as T,
+            update: (key: string, value: unknown) => { state.set(key, value); return Promise.resolve(); },
+        },
+        subscriptions: [] as vscode.Disposable[],
+    } as unknown as vscode.ExtensionContext;
+}
+
+function _mockSecrets(): ISecretConfig {
+    const noop = () => {};
+    return {
+        _serviceBrand: undefined,
+        getGhostApiKey: () => '',
+        getNesApiKey: () => '',
+        setGhostApiKey: async () => {},
+        setNesApiKey: async () => {},
+        deleteGhostApiKey: async () => {},
+        deleteNesApiKey: async () => {},
+        migrateFromPlaintext: async () => ({ ghost: false, nes: false }),
+        onDidChange: (_l: () => void) => { noop(); return { dispose: noop }; },
+    };
+}
+
+test('Config: VSCodeGhostConfigProvider defaults and cache invalidation', async (ctx) => {
+    const provider = new VSCodeGhostConfigProvider(_mockContext(), _mockSecrets());
+
+    ctx.equal(provider.model, 'gpt-4o', 'default model');
+    ctx.equal(provider.promptTemplate, '<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>', 'default promptTemplate');
+
+    // enabled is independent of settings.json cache
+    const initialEnabled = provider.enabled;
+    provider.enabled = false;
+    ctx.equal(provider.enabled, false, 'enabled can be set');
+    ctx.equal(provider.model, 'gpt-4o', 'model still works after enabled change');
+    provider.enabled = initialEnabled;
+});
+
+test('Config: VSCodeGhostConfigProvider caches and invalidates on config change', async (ctx) => {
+    const provider = new VSCodeGhostConfigProvider(_mockContext(), _mockSecrets());
+    const config = vscode.workspace.getConfiguration('cc-completion.ghost');
+
+    ctx.equal(provider.model, 'gpt-4o', 'default before change');
+    await config.update('model', 'gpt-4.1', vscode.ConfigurationTarget.Global);
+    ctx.equal(provider.model, 'gpt-4.1', 'updated after config change');
+    await config.update('model', undefined, vscode.ConfigurationTarget.Global);
+});
+
+test('Config: VSCodeNesConfigProvider defaults and cache invalidation', async (ctx) => {
+    const provider = new VSCodeNesConfigProvider(_mockContext(), _mockSecrets());
+
+    ctx.equal(provider.model, 'gpt-4o', 'default model');
+    ctx.equal(provider.family, 'standard', 'default family');
+    ctx.equal(provider.nextCursorPredictionEnabled, false, 'default nextCursorPredictionEnabled');
+
+    // enabled is independent
+    const initialEnabled = provider.enabled;
+    provider.enabled = false;
+    ctx.equal(provider.enabled, false, 'enabled can be set');
+    ctx.equal(provider.model, 'gpt-4o', 'model still works');
+    provider.enabled = initialEnabled;
+
+    // nextCursorPredictionEnabled uses workspaceState
+    provider.nextCursorPredictionEnabled = true;
+    ctx.equal(provider.nextCursorPredictionEnabled, true, 'can toggle nextCursorPrediction');
+    provider.nextCursorPredictionEnabled = false;
+});
+
+test('Config: VSCodeNesConfigProvider caches and invalidates on config change', async (ctx) => {
+    const provider = new VSCodeNesConfigProvider(_mockContext(), _mockSecrets());
+    const config = vscode.workspace.getConfiguration('cc-completion.nes');
+
+    ctx.equal(provider.model, 'gpt-4o', 'default before change');
+    await config.update('model', 'claude-4', vscode.ConfigurationTarget.Global);
+    ctx.equal(provider.model, 'claude-4', 'updated after config change');
+    await config.update('model', undefined, vscode.ConfigurationTarget.Global);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  InlineSuggestionResolver tests
+// ──────────────────────────────────────────────────────────────
+
+function _mockDoc(lines: string[]): vscode.TextDocument {
+    const content = lines.join('\n');
+    const doc: any = {
+        lineCount: lines.length,
+        lineAt: (line: number) => ({
+            text: lines[line] ?? '',
+            range: new vscode.Range(line, 0, line, (lines[line] ?? '').length),
+        }),
+        offsetAt: (pos: vscode.Position) => {
+            let offset = 0;
+            for (let i = 0; i < pos.line; i++) offset += lines[i].length + 1;
+            return offset + pos.character;
+        },
+        positionAt: (offset: number) => {
+            let line = 0;
+            let remaining = offset;
+            while (line < lines.length && remaining > lines[line].length) {
+                remaining -= lines[line].length + 1;
+                line++;
+            }
+            return new vscode.Position(line, Math.max(0, remaining));
+        },
+        getText: (range?: vscode.Range) => {
+            if (!range) return content;
+            const s = doc.offsetAt(range.start);
+            const e = doc.offsetAt(range.end);
+            return content.substring(s, e);
+        },
+    };
+    return doc;
+}
+
+test('NES: InlineSuggestionResolver', async (ctx) => {
+    const resolver = new InlineSuggestionResolver();
+
+    // Multi-line range → undefined
+    const doc1 = _mockDoc(['function foo() {', '    return 1;', '    // extra', '}']);
+    const r1 = resolver.resolve(new vscode.Position(0, 16), doc1, new vscode.Range(0, 0, 3, 1), 'function foo() {\n    return 2;\n    // extra\n}');
+    ctx.equal(r1, undefined, 'multi-line range → undefined');
+
+    // Same-line ghost text at cursor
+    const doc2 = _mockDoc(['const x = Math.|']);
+    const r2 = resolver.resolve(new vscode.Position(0, 14), doc2, new vscode.Range(0, 14, 0, 14), 'Math.max(1, 2)');
+    ctx.ok(r2 !== undefined, 'same-line returns result');
+    if (r2) ctx.equal(r2.range.start.character, 14, 'start character preserved');
+
+    // Cursor before range → undefined
+    const doc3 = _mockDoc(['const x = oldValue;']);
+    const r3 = resolver.resolve(new vscode.Position(0, 5), doc3, new vscode.Range(0, 10, 0, 18), 'newValue');
+    ctx.equal(r3, undefined, 'cursor before range → undefined');
+
+    // Prefix mismatch → undefined
+    const doc4 = _mockDoc(['prefixXYZsuffix']);
+    const r4 = resolver.resolve(new vscode.Position(0, 7), doc4, new vscode.Range(0, 6, 0, 9), 'ABC');
+    ctx.equal(r4, undefined, 'prefix mismatch → undefined');
+
+    // Next-line insertion rewrite
+    const doc6 = _mockDoc(['const a = 1', '']);
+    const r6 = resolver.resolve(new vscode.Position(0, 11), doc6, new vscode.Range(1, 0, 1, 0), 'const b = 2;\n');
+    ctx.ok(r6 !== undefined, 'next-line returns result');
+    if (r6) ctx.ok(r6.newText.includes('const b = 2;'), 'newText contains inserted line');
+});
+
+test('NES: InlineSuggestionResolver.isSubword', async (ctx) => {
+    ctx.equal(InlineSuggestionResolver.isSubword('abc', 'axbyc'), true, 'subsequence');
+    ctx.equal(InlineSuggestionResolver.isSubword('abc', 'abc'), true, 'exact match');
+    ctx.equal(InlineSuggestionResolver.isSubword('abc', 'def'), false, 'no match');
+    ctx.equal(InlineSuggestionResolver.isSubword('ab', 'ba'), false, 'wrong order');
 });
 
 // ──────────────────────────────────────────────────────────────
