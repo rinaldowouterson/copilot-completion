@@ -99,6 +99,31 @@ export function activate(context: vscode.ExtensionContext) {
             const status = logService.enabled ? 'enabled' : 'disabled';
             vscode.window.showInformationMessage(`CC Completion logging ${status}`);
         }),
+        // Self-diagnostics — runs the LSP-first context pipeline E2E inside
+        // the real VS Code environment where all publisher-trust decisions
+        // are already made. This is the ONLY reliable path for LSP-dependent
+        // assertions (the CLI test runner cannot bypass the trust dialog).
+        vscode.commands.registerCommand('cc-completion.runDiagnostics', async () => {
+            const channel = vscode.window.createOutputChannel('CC Completion Diagnostics');
+            channel.show(true);
+            try {
+                const { runAllDiagnostics } = await import('./diagnostics/runner.js');
+                const result = await runAllDiagnostics(channel);
+                if (result.failed > 0) {
+                    vscode.window.showWarningMessage(
+                        `CC Completion Diagnostics: ${result.passed} passed, ${result.failed} failed (${result.durationMs}ms)`,
+                    );
+                } else {
+                    vscode.window.showInformationMessage(
+                        `CC Completion Diagnostics: All ${result.passed} passed (${result.durationMs}ms)`,
+                    );
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                channel.appendLine(`FATAL: ${msg}`);
+                vscode.window.showErrorMessage(`CC Completion Diagnostics failed: ${msg}`);
+            }
+        }),
     );
 
     // Dispose LogService on deactivation (clean up config listener)

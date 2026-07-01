@@ -2,7 +2,7 @@
   "name": "copilot-completions",
   "displayName": "Copilot Completions",
   "description": "Code completion powered by LLM — GHOST (FIM) and NES (Next Edit Suggestion)",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "engines": {
     "vscode": "^1.110.0"
   },
@@ -62,6 +62,11 @@
       {
         "command": "cc-completion.toggleLogging",
         "title": "CC Completion: Toggle Output Logging",
+        "category": "CC Completion"
+      },
+      {
+        "command": "cc-completion.runDiagnostics",
+        "title": "CC Completion: Run Diagnostics",
         "category": "CC Completion"
       }
     ],
