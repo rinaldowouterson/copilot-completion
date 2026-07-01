@@ -141,25 +141,19 @@ export class ContextBuilderService implements IContextBuilderService {
         const languageId = document.languageId;
         const syntax = getSyntax(languageId);
 
-        // Safety net: any unhandled error in gather() returns a minimal bundle
-        // instead of crashing the inline completion provider.
-        try {
-            return await this._gatherImpl(document, position, config, uri, languageId, syntax);
-        } catch (err) {
-            this._log.error(`[CONTEXT] gather() unhandled error: ${err instanceof Error ? err.message : String(err)}`);
-            return {
-                enclosingScope: undefined,
-                statementEndLine: undefined,
-                fileExports: [],
-                missingImports: [],
-                importResolutions: [],
-                superTypes: undefined,
-                languageId,
-                languageSyntax: syntax,
-            };
-        }
+        // Every phase is independently try/caught so gather() returns
+        // whatever partial data is available — never an empty bundle
+        // unless everything failed. See _gatherImpl for per-phase isolation.
+        return this._gatherImpl(document, position, config, uri, languageId, syntax);
     }
 
+    /**
+     * Gather whatever context is available, phase by phase.
+     *
+     * Each phase is independently try/caught so a failure in one (e.g. LSP
+     * symbol provider timed out) doesn't prevent the others from running.
+     * The fallback bundle always contains at minimum languageId and syntax.
+     */
     private async _gatherImpl(
         document: vscode.TextDocument,
         position: vscode.Position,
@@ -168,71 +162,89 @@ export class ContextBuilderService implements IContextBuilderService {
         languageId: string,
         syntax: LanguageSyntax,
     ): Promise<ContextBundle> {
-
-        // Phase D: notify once per hour per language if no LSP is available.
-        // Fire-and-forget — never blocks gather().
+        // ── Phase D: LSP notification (fire-and-forget, never blocks) ──
         if (config.lspNotifyEnabled) {
             void this._lspNotifier.checkAndNotify(document);
         }
 
-        // Seed workspace index on first gather (only if mode='workspace')
+        // ── Workspace cache seed (fire-and-forget) ──
         if (config.workspaceIndexMode === 'workspace' && !this._workspaceSeeded) {
             this._workspaceSeeded = true;
             void this._seedWorkspaceCache();
         }
 
-        // Per-file LSP symbol lookup (cached, invalidated on edit)
-        let symbols = this._cache.get(uri);
-        if (!symbols || symbols.lineCount !== document.lineCount) {
-            const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
-                'vscode.executeDocumentSymbolProvider',
-                document.uri,
-            );
-            symbols = {
-                symbols: rawSymbols ?? [],
-                lineCount: document.lineCount,
-            };
-            this._cache.set(uri, symbols);
+        // ── Symbols + exports + enclosing scope ──
+        let fileExports: FileExport[] = [];
+        let enclosingScope: EnclosingScope | undefined;
+        try {
+            let symbols = this._cache.get(uri);
+            if (!symbols || symbols.lineCount !== document.lineCount) {
+                const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
+                    'vscode.executeDocumentSymbolProvider',
+                    document.uri,
+                );
+                symbols = {
+                    symbols: rawSymbols ?? [],
+                    lineCount: document.lineCount,
+                };
+                this._cache.set(uri, symbols);
+            }
+            this._mergeDocumentSymbols(document.uri.toString(), symbols.symbols);
+            fileExports = extractFileExports(symbols.symbols, languageId);
+            enclosingScope = findEnclosingScope(symbols.symbols, position);
+        } catch (err) {
+            this._log.error(`[CONTEXT] symbols failed: ${err instanceof Error ? err.message : String(err)}`);
         }
 
-        // Merge per-file symbols into workspace cache (keeps current file fresh)
-        this._mergeDocumentSymbols(document.uri.toString(), symbols.symbols);
+        // ── Phase B: statement end (LSP SelectionRange + heuristic fallback) ──
+        let statementEndLine: number | undefined;
+        try {
+            statementEndLine = await findStatementEnd(document, position);
+        } catch (err) {
+            this._log.error(`[CONTEXT] statementEnd failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
-        // Build the bundle
-        const fileExports = extractFileExports(symbols.symbols, languageId);
-        const enclosingScope = findEnclosingScope(symbols.symbols, position);
-
-        // Phase B: LSP SelectionRange primary + heuristic fallback (async)
-        const statementEndLine = await findStatementEnd(document, position);
-
-        // Phase G: super-types for OOP languages (graceful no-op otherwise)
+        // ── Phase G: super-types ──
         let superTypes: EnclosingScope[] | undefined;
         if (config.typeHierarchyEnabled) {
-            superTypes = await fetchSuperTypes(document, position, enclosingScope);
+            try {
+                superTypes = await fetchSuperTypes(document, position, enclosingScope);
+            } catch (err) {
+                this._log.error(`[CONTEXT] superTypes failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
         }
 
-        // Context gathered successfully — log summary
+        // ── Log what we have so far ──
         if (fileExports.length > 0 || enclosingScope) {
             const scopeInfo = enclosingScope
                 ? `scope=${enclosingScope.kind} ${enclosingScope.name} (${enclosingScope.startLine}-${enclosingScope.endLine})`
                 : 'no_enclosing_scope';
-            const exportCount = fileExports.length;
             const wsFiles = this._workspaceCache.size;
             const superInfo = superTypes ? ` superTypes=${superTypes.map(s => s.name).join(',')}` : '';
-            this._log.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}${superInfo}`);
+            this._log.debug(`[CONTEXT] ${scopeInfo} exports=${fileExports.length} ws_files=${wsFiles} statement_end=${statementEndLine}${superInfo}`);
         }
 
-        // Phase A: Resolve import targets via LSP document links (primary)
-        // with file-system fallback.
-        const importResolutions = config.ghostScoping === 'lsp' || config.nesScoping === 'lsp'
-            ? await this._resolveImportTargets(document.uri, document.getText(), languageId, config.hoverEnrichmentEnabled)
-            : [];
+        // ── Phase A: import resolution ──
+        let importResolutions: ImportResolution[] = [];
+        if (config.ghostScoping === 'lsp' || config.nesScoping === 'lsp') {
+            try {
+                importResolutions = await this._resolveImportTargets(
+                    document.uri, document.getText(), languageId, config.hoverEnrichmentEnabled,
+                );
+            } catch (err) {
+                this._log.error(`[CONTEXT] import resolution failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
 
-        // Phase H: detect missing imports (informational — the actual
-        // auto-import edits are fetched by `detectMissingImports()`).
-        const missingImports: MissingImport[] = config.autoImportEnabled
-            ? (await this._detectMissingImportSymbols(document)).slice(0, 5)
-            : [];
+        // ── Phase H: missing imports ──
+        let missingImports: MissingImport[] = [];
+        if (config.autoImportEnabled) {
+            try {
+                missingImports = (await this._detectMissingImportSymbols(document)).slice(0, 5);
+            } catch (err) {
+                this._log.error(`[CONTEXT] missingImports failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
 
         return {
             enclosingScope,
