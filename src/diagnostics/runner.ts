@@ -18,9 +18,10 @@ import * as assert from 'assert';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ContextBuilderService } from '../completions/context/contextBuilderService';
+import { ContextBuilderService, normalizePath } from '../completions/context/contextBuilderService';
 import { LogService } from '../completions/shared/log/logService';
-import { LANG_TO_LSP_EXTENSIONS, extensionUriFor } from '../completions/context/lspSupport';
+import { LANG_TO_LSP_EXTENSIONS, extensionUriFor, hasLspSupport } from '../completions/context/lspSupport';
+import { cleanHoverSignature } from '../completions/context/hoverEnrichment';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -489,15 +490,21 @@ test('Phase C: hover enrichment provides type signatures', async (ctx) => {
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 12));
 
-    ctx.value('fileExports count', bundle.fileExports.length);
-    if (bundle.fileExports.length > 0) {
-        const hasTypes = bundle.fileExports.some(e => e.type !== undefined);
-        ctx.value('exports with type sigs', bundle.fileExports.filter(e => e.type !== undefined).map(e => `${e.name}:${e.type}`));
-        // Soft assertion — hover enrichment depends on LSP link + hover provider support.
-        // Log the result without failing the test.
-        if (!hasTypes) {
-            ctx.value('hover type signatures', 'none (LSP may not support hover for this context)');
+    // NOTE: Hover type signatures are stored in importResolutions[].typeSignatures,
+    // NOT on fileExports[].type (which is never populated).
+    ctx.value('importResolutions count', bundle.importResolutions.length);
+    if (bundle.importResolutions.length > 0) {
+        const imp = bundle.importResolutions[0];
+        if (imp.typeSignatures) {
+            ctx.value('typeSignatures keys', Object.keys(imp.typeSignatures));
+            for (const [name, sig] of Object.entries(imp.typeSignatures)) {
+                ctx.value(`hover sig: ${name}`, sig);
+            }
+        } else {
+            ctx.value('typeSignatures', 'none (LSP resolved import but hover returned no data)');
         }
+    } else {
+        ctx.value('typeSignatures', 'skipped (no import resolutions — LSP link provider may not have resolved)');
     }
 
     await removeFile(targetUri);
@@ -894,6 +901,110 @@ test('[P0] gather() safety net: unusual UTF-8 content does not throw', async (ct
     ctx.ok(Array.isArray(bundle.missingImports), 'missingImports is array');
     ctx.equal(bundle.languageId, 'typescript', 'languageId');
     ctx.value('exports', bundle.fileExports.map(e => e.name));
+
+    await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Utility function tests (pure, no LSP needed)
+// ──────────────────────────────────────────────────────────────
+
+test('normalizePath: resolves ./ and ../ segments', async (ctx) => {
+    ctx.equal(normalizePath('a/./b/../c'), 'a/c', 'simple ./ and ../');
+    ctx.equal(normalizePath('/a/b/../c'), '/a/c', 'absolute path with ../');
+    ctx.equal(normalizePath('./a/b'), 'a/b', 'leading ./ is stripped');
+    ctx.equal(normalizePath('a/../../b'), 'b', 'going above root resolves to empty prefix');
+    ctx.equal(normalizePath('a/b/c'), 'a/b/c', 'no dots, unchanged');
+    ctx.value('normalizePath', '5 cases passed');
+});
+
+test('cleanHoverSignature: strips code fences and collapses whitespace', async (ctx) => {
+    // Standard TS hover with code fence
+    const withFence = '```ts\nfunction greet(name: string): string\n```';
+    ctx.equal(cleanHoverSignature(withFence), 'function greet(name: string): string', 'strips ```ts fence');
+
+    // Multi-line with opening fence only
+    const multiLine = '```ts\nconst x: number = 1\nconst y: string = "hello"';
+    const cleaned = cleanHoverSignature(multiLine);
+    ctx.ok(cleaned.includes('const x: number = 1'), 'first line preserved');
+    ctx.ok(cleaned.includes('const y: string = "hello"'), 'second line preserved');
+
+    // Truncation at 120 chars
+    const longSig = 'x'.repeat(200);
+    const truncated = cleanHoverSignature(longSig);
+    ctx.ok(truncated.length <= 120, `truncated length ${truncated.length} <= 120`);
+    ctx.ok(truncated.endsWith('…'), 'truncated ends with ellipsis');
+
+    // Empty input
+    ctx.equal(cleanHoverSignature(''), '', 'empty returns empty');
+    ctx.equal(cleanHoverSignature('   '), '', 'whitespace-only returns empty');
+
+    // No code fence
+    ctx.equal(cleanHoverSignature('plain text'), 'plain text', 'no fence passes through');
+
+    ctx.value('cleanHoverSignature', '6 cases passed');
+});
+
+test('hasLspSupport: returns false for plain text files', async (ctx) => {
+    const uri = tmpUri('.txt', 'haslsp_txt');
+    await writeFile(uri, 'plain text\n');
+    await openDocument(uri);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const supported = await hasLspSupport(doc);
+    ctx.equal(supported, false, 'plain text has no LSP support');
+    await removeFile(uri);
+});
+
+test('hasLspSupport: returns true for TypeScript files', async (ctx) => {
+    const uri = tmpUri('.ts', 'haslsp_ts');
+    await writeFile(uri, 'export const x = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const supported = await hasLspSupport(doc);
+    ctx.ok(supported, 'TypeScript file has LSP support');
+    await removeFile(uri);
+});
+
+test('public detectMissingImports() returns array for clean file', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'pub_detect_missing');
+    await writeFile(uri, 'export const ok = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const fixes = await builder.detectMissingImports(doc);
+
+    ctx.ok(Array.isArray(fixes), 'fixes is array');
+    ctx.equal(fixes.length, 0, 'clean file has 0 missing imports');
+    ctx.value('public detectMissingImports', 'clean file, 0 fixes');
+
+    await removeFile(uri);
+});
+
+test('public detectMissingImports() finds unresolvable symbol', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'pub_detect_missing2');
+    await writeFile(uri, 'const result = unknownFunction("test");\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+    await new Promise(r => setTimeout(r, 1000)); // let diagnostics propagate
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const fixes = await builder.detectMissingImports(doc);
+
+    ctx.ok(Array.isArray(fixes), 'fixes is array');
+    ctx.value('detectMissingImports result count', fixes.length);
+    if (fixes.length > 0) {
+        ctx.value('first fix symbol', fixes[0].symbolName);
+    }
 
     await removeFile(uri);
 });
