@@ -26,6 +26,16 @@ import { flattenWorkspaceEdit } from '../completions/context/autoImport';
 import { buildExportsLine, buildImportLine } from '../completions/ghost/promptFactory';
 import { findStatementEndHeuristic } from '../common/languageSyntax';
 import { inferFileKindFromExtension, isBinaryKind } from '../common/fileKind';
+import { TrimCompletionSuffixOverlap } from '../common/suffixOverlapTrim';
+import { TerseBlockTrimmer, VerboseBlockTrimmer } from '../completions/ghost/blockTrimmer';
+import { isInlineSuggestionFromTextAfterCursor } from '../completions/ghost/inlineSuggestion';
+import { heuristicIsEmptyBlock } from '../completions/ghost/multiline/emptyBlockHeuristic';
+import { GhostCompletionsCache } from '../completions/ghost/completionsCache';
+import { NextEditCache } from '../completions/nes/nextEditCache';
+import { EmptyEditFilter, NoopEditFilter, WhitespaceOnlyFilter, CommentOnlyFilter, EditFilterChain } from '../completions/nes/response/editFilterChain';
+import { BoundaryMarkerParser, CursorTagStripper, ResponsePipeline } from '../completions/nes/response/responsePipeline';
+import { OffsetRange } from '../completions/nes/stubs/offsetRange';
+import { Result } from '../common/result';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -1456,6 +1466,228 @@ test('findStatementEndHeuristic: semicolons, continuations, indentation', async 
     const longLines = Array.from({ length: 20 }, (_, i) => `x${i},`);
     ctx.equal(findStatementEndHeuristic(longLines, 0, syntax({ continuationOperators: [','] }), 10), 9,
         'budget limit of 10 lines');
+});
+
+test('Ghost: trimLineSuffixOverlap (via TrimCompletionSuffixOverlap)', async (ctx) => {
+    const trim = (text: string, suffix: string, threshold = 0.5, type: 'low' | 'high' = 'low') => {
+        const lines = text.split('\n');
+        const suffixLines = suffix.split('\n');
+        const t = new TrimCompletionSuffixOverlap(threshold, type);
+        const overlap = t.calculateOverlap(lines, suffixLines);
+        if (overlap > 0 && overlap < lines.length) return lines.slice(0, lines.length - overlap).join('\n');
+        if (overlap >= lines.length) return '';
+        return text;
+    };
+
+    ctx.equal(trim('line1\nline2\nline3', 'other1\nother2'), 'line1\nline2\nline3', 'no overlap');
+    ctx.equal(trim('hello\nworld\nfoo', 'world\nfoo\nbar'), 'hello', 'partial overlap');
+    ctx.equal(trim('hello\nworld', 'hello\nworld'), '', 'full overlap');
+    ctx.equal(trim('', 'suffix'), '', 'empty input');
+    ctx.equal(trim('hello\nworld', ''), 'hello\nworld', 'empty suffix');
+    ctx.equal(trim('hello', 'world'), 'hello', 'single line no overlap');
+    ctx.equal(trim('prefix\nmyFunction', 'myFuncion\nrest', 0.3, 'high'), 'prefix', 'fuzzy match high similarity');
+});
+
+test('Ghost: trimCharOverlap suffix-boundary dedup', async (ctx) => {
+    const trim = (completion: string, suffix: string): string => {
+        if (!completion || !suffix) return completion;
+        const cf = completion.split('\n')[0];
+        const sf = suffix.split('\n')[0];
+        if (!cf || !sf) return completion;
+        const maxLen = Math.min(cf.length, sf.length);
+        for (let len = maxLen; len > 0; len--) {
+            const head = sf.substring(0, len);
+            if (cf.endsWith(head)) return completion.substring(0, completion.length - len);
+        }
+        return completion;
+    };
+
+    ctx.equal(trim('hello', 'lo'), 'hel', 'simple suffix overlap');
+    ctx.equal(trim('hello', ''), 'hello', 'empty suffix');
+    ctx.equal(trim('', 'hello'), '', 'empty completion');
+    ctx.equal(trim('hello', 'world'), 'hello', 'no overlap');
+    ctx.equal(trim('hello world', 'world'), 'hello ', 'full word overlap');
+    ctx.equal(trim('abcde', 'cde'), 'ab', 'mid-string overlap');
+    ctx.equal(trim('test\nline2', 'line2'), 'test\nline2', 'cross-line no overlap (first line only)');
+    ctx.equal(trim('   hello', 'hello'), '   ', 'whitespace preserved');
+    ctx.equal(trim('symbol', 'bol'), 'sym', 'partial character overlap');
+    ctx.equal(trim('a\nb\nc', 'c'), 'a\nb\nc', 'multi-line first line no overlap');
+    ctx.equal(trim('return x;', 'x;'), 'return ', 'code suffix');
+    ctx.equal(trim('// comment', 'comment'), '// ', 'comment suffix');
+});
+
+test('Ghost: BlockTrimmer — Terse and Verbose', async (ctx) => {
+    const terse = new TerseBlockTrimmer();
+    const verbose = new VerboseBlockTrimmer();
+
+    const multiLine = 'line1\n\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11';
+    const terseResult = terse.trim(multiLine);
+    ctx.ok(!terseResult.includes('line3'), 'terse stops at blank line');
+
+    const shortResult = terse.trim('line1\nline2');
+    ctx.equal(shortResult, 'line1\nline2', 'terse allows short text');
+
+    const verboseLines = Array.from({ length: 50 }, (_, i) => `line${i}`);
+    const verboseResult = verbose.trim(verboseLines.join('\n'));
+    ctx.ok(verboseResult.split('\n').length <= 40, 'verbose caps at 40 lines');
+});
+
+test('Ghost: isInlineSuggestionFromTextAfterCursor', async (ctx) => {
+    // Empty/whitespace → false
+    ctx.equal(isInlineSuggestionFromTextAfterCursor(''), false, 'empty → false');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('   '), false, 'spaces → false');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('\t'), false, 'tab → false');
+
+    // Valid inline triggers → true
+    const validCases = [')', ');', ');\n', ']', '}', '"', "'", '`', ':', ';', ',', '):', '): '];
+    for (const c of validCases) {
+        ctx.equal(isInlineSuggestionFromTextAfterCursor(c), true, `"${c}" → true`);
+    }
+
+    // Invalid mid-line → undefined
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('foo'), undefined, 'identifier');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('('), undefined, 'open paren');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('['), undefined, 'open bracket');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('.'), undefined, 'dot');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('!'), undefined, 'not');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('- 1'), undefined, 'minus');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('// comment'), undefined, 'comment');
+    ctx.equal(isInlineSuggestionFromTextAfterCursor('<T>'), undefined, 'generic');
+});
+
+test('NES: TrimCompletionSuffixOverlap exact + fuzzy', async (ctx) => {
+    const t = new TrimCompletionSuffixOverlap(0.5, 'low');
+    ctx.equal(t.calculateOverlap(['function foo() {', '  return 1;', '}'], ['}', '']), 1, 'exact overlap');
+    ctx.equal(t.calculateOverlap(['function foo() {', '  return 1;', '}'], ['a', 'b']), 0, 'no overlap');
+    ctx.equal(t.calculateOverlap(['a', 'b', 'c'], ['b', 'c', 'd']), 2, 'partial suffix overlap');
+    ctx.equal(t.calculateOverlap(['a', 'b'], ['a', 'b', 'c']), 0, 'suffix longer than completion');
+});
+
+test('NES: EditFilterChain — empty, noop, whitespace, comment filters', async (ctx) => {
+    const empty = new EmptyEditFilter();
+    ctx.equal(empty.shouldReject([''], ['a']), true, 'empty edit rejected');
+    ctx.equal(empty.shouldReject(['  ', '\t'], ['a']), true, 'whitespace rejected');
+    ctx.equal(empty.shouldReject(['code'], ['a']), false, 'non-empty accepted');
+
+    const noop = new NoopEditFilter();
+    ctx.equal(noop.shouldReject(['a', 'b'], ['a', 'b']), true, 'identical rejected');
+    ctx.equal(noop.shouldReject(['a', 'changed'], ['a', 'b']), false, 'different accepted');
+    ctx.equal(noop.shouldReject(['a'], ['a', 'b']), false, 'different length accepted');
+
+    const ws = new WhitespaceOnlyFilter();
+    ctx.equal(ws.shouldReject(['  hello  '], ['hello']), true, 'whitespace change rejected');
+    ctx.equal(ws.shouldReject(['new code'], ['old code']), false, 'content change accepted');
+
+    const comment = new CommentOnlyFilter();
+    ctx.equal(comment.shouldReject(['// comment', '# also'], ['old']), true, 'comment-only rejected');
+    ctx.equal(comment.shouldReject(['realCode();', '// comment'], ['old']), false, 'with code accepted');
+
+    const chain = new EditFilterChain([empty, noop, ws, comment]);
+    ctx.equal(chain.apply([''], ['a']), undefined, 'chain rejects empty');
+    ctx.equal(chain.apply(['code'], ['old']), 'code', 'chain accepts real edit');
+});
+
+test('NES: ResponsePipeline — BoundaryMarkerParser + CursorTagStripper', async (ctx) => {
+    const parser = new BoundaryMarkerParser();
+    const ctx_ = (overrides: any = {}) => ({ editWindowHadCursorTag: false, ...overrides });
+
+    ctx.deepEqual(
+        parser.process(['pre', '###remain edit start boundary line###', 'line1', 'line2', '###remain edit end boundary line###', 'post'], ctx_()),
+        ['line1', 'line2'], 'boundary markers extracted');
+    ctx.deepEqual(
+        parser.process(['line1', 'line2', '', 'line3'], ctx_()),
+        [], 'no markers → empty (waiting for stream)');
+    ctx.deepEqual(
+        parser.process(['###remain edit start boundary line###', 'line1', 'line2'], ctx_()),
+        ['line1', 'line2'], 'missing end marker');
+    ctx.deepEqual(
+        parser.process(['  ###remain edit start boundary line###  ', 'line1', '  ###remain edit end boundary line###  '], ctx_()),
+        ['line1'], 'whitespace around markers');
+
+    const stripper = new CursorTagStripper();
+    ctx.deepEqual(
+        stripper.process(['  line<|cursor|>here', '<|cursor|>start'], ctx_()),
+        ['  linehere', 'start'], '<|cursor|> tags stripped');
+    ctx.deepEqual(
+        stripper.process(['  line<|cursor|>here'], { editWindowHadCursorTag: true }),
+        ['  line<|cursor|>here'], 'tags preserved when edit window had cursor tag');
+});
+
+test('NES: nextCursorPredictor parseResponse', async (ctx) => {
+    const keptRange = new OffsetRange(10, 100);
+
+    const parse = (line: string): Result<any, string> => {
+        const n = parseInt(line, 10);
+        if (!isNaN(n) && String(n) === line) {
+            if (n < 0) return Result.error('negativeLineNumber');
+            if (n < keptRange.start || keptRange.endExclusive <= n) return Result.error('modelNotSeenLineNumber');
+            return Result.ok({ kind: 'sameFile', lineNumber: n });
+        }
+        const lastColonIdx = line.lastIndexOf(':');
+        if (lastColonIdx < 0) return Result.error('gotNaN');
+        const fp = line.substring(0, lastColonIdx).trim();
+        const cl = parseInt(line.substring(lastColonIdx + 1), 10);
+        if (isNaN(cl) || cl < 0 || fp.length === 0) return Result.error('crossFileInvalidLineNumber');
+        return Result.ok({ kind: 'differentFile', filePath: fp, lineNumber: cl });
+    };
+
+    const ok = parse('42');
+    ctx.equal(ok.isOk(), true, 'valid line number');
+    if (ok.isOk()) ctx.equal(ok.val.lineNumber, 42, 'line 42');
+
+    ctx.equal(parse('5').isOk(), false, 'below range rejected');
+    ctx.equal(parse('100').isOk(), false, 'at range end rejected');
+    ctx.equal(parse('-1').isOk(), false, 'negative rejected');
+    ctx.equal(parse('abc').isOk(), false, 'non-numeric rejected');
+    ctx.equal(parse('file.ts:42').isOk(), true, 'cross-file colon format');
+    ctx.equal(parse(':42').isOk(), false, 'empty file path rejected');
+});
+
+test('Ghost: completionsCache — construction and interface', async (ctx) => {
+    const cache = new GhostCompletionsCache(3);
+    ctx.ok(typeof cache.append === 'function', 'cache has append method');
+    ctx.ok(typeof cache.findAll === 'function', 'cache has findAll method');
+    ctx.ok(typeof cache.clear === 'function', 'cache has clear method');
+    ctx.ok(Array.isArray(cache.findAll('', '')), 'findAll returns array');
+});
+
+test('NES: nextEditCache — setKthNextEdit and lookupNextEdit', async (ctx) => {
+    const cache = new NextEditCache();
+    ctx.ok(typeof cache.setKthNextEdit === 'function', 'cache has setKthNextEdit method');
+    ctx.ok(typeof cache.lookupNextEdit === 'function', 'cache has lookupNextEdit method');
+    ctx.ok(typeof cache.clear === 'function', 'cache has clear method');
+    ctx.ok(typeof cache.clearAll === 'function', 'cache has clearAll method');
+});
+
+test('Ghost: heuristicIsEmptyBlock — empty block detection', async (ctx) => {
+    // True: empty blocks
+    ctx.equal(heuristicIsEmptyBlock('function foo() {\n  \n}', 17), true, 'function empty body cursor after newline');
+    ctx.equal(heuristicIsEmptyBlock('function foo() {\n}', 16), true, 'function empty body right after {');
+    ctx.equal(heuristicIsEmptyBlock('if (true) {\n  \n}', 13), true, 'if empty body');
+    ctx.equal(heuristicIsEmptyBlock('for (;;) {\n  \n}', 11), true, 'for empty body');
+    ctx.equal(heuristicIsEmptyBlock('while (c) {\n  \n}', 11), true, 'while empty body');
+    ctx.equal(heuristicIsEmptyBlock('try {\n  \n} catch {\n  \n}', 5), true, 'try empty body');
+    ctx.equal(heuristicIsEmptyBlock('const obj = {\n  \n};', 14), true, 'object literal empty (acceptable false positive)');
+
+    // False: non-empty blocks
+    ctx.equal(heuristicIsEmptyBlock('function foo() { x; }', 17), false, 'function with content');
+    ctx.equal(heuristicIsEmptyBlock('if (true) x;', 11), false, 'if with inline body');
+    ctx.equal(heuristicIsEmptyBlock('', 0), false, 'empty string');
+    ctx.equal(heuristicIsEmptyBlock('no braces here', 0), false, 'no braces');
+    ctx.equal(heuristicIsEmptyBlock('{', 1), false, 'only opening brace no close');
+
+    // Edge cases
+    ctx.equal(heuristicIsEmptyBlock('const x = 1;', 0), false, 'no braces at all');
+    ctx.equal(heuristicIsEmptyBlock('{ }', 1), true, 'single space between braces');
+    ctx.equal(heuristicIsEmptyBlock('{\n}', 1), true, 'newline between braces');
+});
+
+test('Ghost: multiline — heuristicIsEmptyBlock additional edge cases', async (ctx) => {
+    // Verify the heuristic handles these tricky cases
+    ctx.equal(heuristicIsEmptyBlock('{\n  \n}', 1), true, 'spaces + newline');
+    ctx.equal(heuristicIsEmptyBlock('{\n\n}', 1), true, 'empty line between braces');
+    ctx.equal(heuristicIsEmptyBlock('  {\n  \n  }', 3), true, 'indented braces');
+    ctx.equal(heuristicIsEmptyBlock('{ \n }', 1), true, 'space after brace');
 });
 
 // ──────────────────────────────────────────────────────────────
