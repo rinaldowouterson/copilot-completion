@@ -327,7 +327,7 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "echo 'Run \"CC Completion: Run Diagnostics\" in VS Code instead. The vscode-test CLI is not used — diagnostics run in the live extension host.'"
   },
   "overrides": {
     "serialize-javascript": "7.0.7",

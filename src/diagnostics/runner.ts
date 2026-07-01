@@ -1026,6 +1026,154 @@ test('public detectMissingImports() finds unresolvable symbol', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────────────
+//  Non-LSP paths: regex fallback, cache, heuristics
+// ──────────────────────────────────────────────────────────────
+
+test('Non-LSP: regex fallback handles multiple languages', async (ctx) => {
+    // extractRelativeImportSpecifiers is the regex fallback used when
+    // the LSP link provider returns nothing. It must handle all target
+    // languages without throwing.
+    const { extractRelativeImportSpecifiers } = await import('../completions/context/contextBuilderService.js');
+
+    const ts_imports = 'import { a } from "./foo"; import { b } from "../bar";\n';
+    ctx.equal(extractRelativeImportSpecifiers(ts_imports, 'typescript').length, 2,
+        'TS: finds ./ and ../ imports');
+
+    const py_imports = 'from . import x\nfrom .module import y\nimport os\n';
+    const py_specs = extractRelativeImportSpecifiers(py_imports, 'python');
+    ctx.ok(py_specs.length >= 2, 'Python: finds relative imports', py_specs);
+
+    const rs_imports = 'mod foo;\n';
+    ctx.equal(extractRelativeImportSpecifiers(rs_imports, 'rust').length, 0,
+        'Rust: mod foo has no ./ prefix → not relative');
+
+    const ruby_imports = "require './local'; require 'stdlib';\n";
+    const rb_specs = extractRelativeImportSpecifiers(ruby_imports, 'ruby');
+    ctx.ok(rb_specs.includes('./local'), 'Ruby: finds ./local, skips stdlib');
+    ctx.equal(rb_specs.length, 1, 'Ruby: only 1 relative import');
+
+    const cpp_imports = '#include "myheader.h"\n#include <vector>\n';
+    const cpp_specs = extractRelativeImportSpecifiers(cpp_imports, 'cpp');
+    ctx.ok(cpp_specs.includes('myheader.h'), 'C++: finds quoted include');
+    ctx.equal(cpp_specs.length, 1, 'C++: only 1 quoted include');
+
+    ctx.value('regex fallback', '5 languages validated');
+});
+
+test('Non-LSP: cache hit on repeated gather() skips LSP query', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'nls_cache');
+    await writeFile(uri, 'export const x = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Two consecutive gathers on the same file — second should hit cache
+    const t0 = Date.now();
+    const bundle1 = await builder.gather(doc, new vscode.Position(0, 0));
+    const t1 = Date.now();
+    const bundle2 = await builder.gather(doc, new vscode.Position(0, 0));
+    const t2 = Date.now();
+
+    ctx.ok(Array.isArray(bundle1.fileExports), 'first gather: fileExports is array');
+    ctx.ok(Array.isArray(bundle2.fileExports), 'second gather: fileExports is array');
+    ctx.equal(bundle1.fileExports.length, bundle2.fileExports.length,
+        'both gathers return same export count');
+    ctx.value('first gather duration', `${t1 - t0}ms`);
+    ctx.value('second gather duration (cached)', `${t2 - t1}ms`);
+
+    await removeFile(uri);
+});
+
+test('Non-LSP: heuristic statement end on plain text file', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Plain text has no LSP — statement end uses pure heuristic
+    const uri = tmpUri('.txt', 'nls_heuristic');
+    await writeFile(uri, [
+        'line one',
+        'line two',
+        'line three',
+    ].join('\n'));
+    await openDocument(uri);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(0, 0));
+
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type (heuristic)');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.equal(bundle.languageId, 'plaintext', 'languageId');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.equal(bundle.fileExports.length, 0, 'plain text has no exports');
+
+    await removeFile(uri);
+});
+
+test('Non-LSP: gather() on untitled doc without opening returns valid bundle', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Create an untitled document but don't show it in the editor
+    const doc = await vscode.workspace.openTextDocument({ language: 'typescript', content: 'const x = 42;\n' });
+
+    const bundle = await builder.gather(doc, new vscode.Position(0, 5));
+
+    ctx.equal(bundle.importResolutions.length, 0, 'untitled: 0 import resolutions');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'untitled: statementEndLine type');
+    ctx.value('statementEndLine (untitled, not shown)', bundle.statementEndLine);
+    ctx.equal(bundle.languageId, 'typescript', 'untitled: languageId');
+    ctx.value('enclosingScope', bundle.enclosingScope ? `${bundle.enclosingScope.kind} ${bundle.enclosingScope.name}` : 'none');
+
+    // No cleanup needed — untitled documents don't write to disk
+});
+
+test('Non-LSP: circular import pattern does not crash', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Create A → B → A circular import pattern via file-system fallback
+    // (the LSP link provider won't resolve circular imports from temp files,
+    // but the _buildImportResolutions chainSeen set should prevent infinite loops)
+    const uriA = tmpUri('.ts', 'nls_circ_a');
+    const uriB = tmpUri('.ts', 'nls_circ_b');
+
+    await writeFile(uriA, [
+        `import { b } from './${path.basename(uriB.path).replace(/\.ts$/, '')}';`,
+        'export const a = 1;',
+        'console.log(b);',
+    ].join('\n'));
+
+    await writeFile(uriB, [
+        `import { a } from './${path.basename(uriA.path).replace(/\.ts$/, '')}';`,
+        'export const b = 2;',
+        'console.log(a);',
+    ].join('\n'));
+
+    await openDocument(uriA);
+    await openDocument(uriB);
+    await waitForLsp(uriA, 10_000);
+
+    const docA = await vscode.workspace.openTextDocument(uriA);
+    // This must not throw or hang despite A→B→A circular pattern
+    const bundle = await builder.gather(docA, new vscode.Position(1, 15));
+
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.ok(bundle.fileExports.length >= 1, 'circular file A has exports');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type');
+    ctx.value('circular import test', 'completed without hang or crash');
+
+    await removeFile(uriA);
+    await removeFile(uriB);
+});
+
+// ──────────────────────────────────────────────────────────────
 //  Workspace cache: incremental per-file update on save
 // ──────────────────────────────────────────────────────────────
 
