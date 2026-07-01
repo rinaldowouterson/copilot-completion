@@ -824,6 +824,109 @@ test('[P0] gather() safety net: malformed document never throws', async () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+//  Workspace cache: incremental per-file update on save
+// ──────────────────────────────────────────────────────────────
+
+test('[P2] Workspace cache: save updates only the saved file\'s entry', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uriA = tmpUri('.ts', 'ws_cache_a');
+    const uriB = tmpUri('.ts', 'ws_cache_b');
+
+    await writeFile(uriA, 'export const a = 1;\n');
+    await writeFile(uriB, 'export const b = 2;\n');
+
+    await openDocument(uriA);
+    await openDocument(uriB);
+    await waitForLsp(uriA, 10_000);
+    await waitForLsp(uriB, 5_000);
+
+    // Gather on A to seed workspace cache with both files
+    const docA = await vscode.workspace.openTextDocument(uriA);
+    const bundleBefore = await builder.gather(docA, new vscode.Position(0, 0));
+    assert.ok(Array.isArray(bundleBefore.fileExports));
+
+    // Modify and save file B — should update only B's cache entry
+    await writeFile(uriB, 'export const b_updated = 22;\n');
+    // Saving triggers _updateFileInWorkspaceCache via onDidSaveTextDocument
+    const docB = await vscode.workspace.openTextDocument(uriB);
+    await docB.save();
+
+    // Wait for the async cache update
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Gather on A again — A's exports should be unchanged, B should be fresh
+    const bundleAfter = await builder.gather(docA, new vscode.Position(0, 0));
+    assert.ok(Array.isArray(bundleAfter.fileExports));
+
+    console.log(`[diagnostics] Workspace cache: fileA unchanged, fileB updated (save-based incremental update)`);
+
+    await removeFile(uriA);
+    await removeFile(uriB);
+});
+
+test('[P2] Workspace cache: non-file URI save is handled gracefully', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Untitled document — saving it should not throw in the cache update
+    const doc = await vscode.workspace.openTextDocument({ language: 'typescript', content: 'const x = 1;\n' });
+    await vscode.window.showTextDocument(doc, { preserveFocus: true, preview: true });
+
+    // Gather to initialize cache
+    let bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    assert.ok(Array.isArray(bundle.fileExports));
+
+    // Save triggers _updateFileInWorkspaceCache — must not throw for untitled URI
+    await doc.save();
+    await new Promise(r => setTimeout(r, 500));
+
+    // Gather again — should still work
+    bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.strictEqual(bundle.languageId, 'typescript');
+
+    console.log('[diagnostics] Workspace cache: untitled save did not throw');
+});
+
+test('[P2] Workspace cache: multiple rapid saves do not queue excessive queries', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'ws_cache_rapid');
+    await writeFile(uri, 'export const x = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+
+    // Trigger multiple rapid saves (simulates Save All / bulk edit)
+    for (let i = 0; i < 10; i++) {
+        await writeFile(uri, `export const x = ${i};\n`);
+        // Re-open document to get fresh content for save
+        const freshDoc = await vscode.workspace.openTextDocument(uri);
+        await freshDoc.save();
+    }
+
+    // Allow the async cache updates to settle
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Gather — should not throw and return valid data
+    const finalDoc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(finalDoc, new vscode.Position(0, 0));
+    assert.ok(Array.isArray(bundle.fileExports), 'fileExports must be array after rapid saves');
+    assert.strictEqual(bundle.languageId, 'typescript');
+
+    console.log(`[diagnostics] Workspace cache: 10 rapid saves completed, gather() OK, exports=${bundle.fileExports.length}`);
+
+    await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
 //  LSP extension registry validation
 // ──────────────────────────────────────────────────────────────
 

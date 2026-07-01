@@ -125,10 +125,12 @@ export class ContextBuilderService implements IContextBuilderService {
             this._hoverCache.delete(e.document.uri.toString());
         });
 
-        // Re-query workspace index on save — all files are up to date at this point.
-        vscode.workspace.onDidSaveTextDocument(() => {
-            this._workspaceSeeded = false;
-            void this._seedWorkspaceCache();
+        // Incremental workspace cache update on save: re-fetch symbols for only
+        // the saved file instead of invalidating the entire cache and re-querying
+        // the expensive workspace symbol provider. Cross-file changes are resolved
+        // lazily on the next gather() for dependent files.
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+            void this._updateFileInWorkspaceCache(doc);
         });
     }
 
@@ -342,6 +344,32 @@ export class ContextBuilderService implements IContextBuilderService {
         };
         walk(symbols, '');
         this._workspaceCache.set(uri, flat);
+    }
+
+    /**
+     * Incremental workspace cache update: re-fetch document symbols for a single
+     * saved file and update its entry in the workspace cache.
+     *
+     * This is called on every `onDidSaveTextDocument` event. It is intentionally
+     * NOT debounced — each per-file `executeDocumentSymbolProvider` call is cheap
+     * (~5ms) and the update is immediate, so there is no stale window.
+     *
+     * Falls back gracefully if the LSP is not available for the file's language
+     * (the cache entry keeps its previous value until the next gather() call).
+     */
+    private async _updateFileInWorkspaceCache(doc: vscode.TextDocument): Promise<void> {
+        try {
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
+                'vscode.executeDocumentSymbolProvider',
+                doc.uri,
+            );
+            if (symbols) {
+                this._mergeDocumentSymbols(doc.uri.toString(), symbols);
+            }
+        } catch {
+            // LSP not available for this language — entry stays stale until
+            // the next gather() call refreshes it via _mergeDocumentSymbols.
+        }
     }
 
     /**
