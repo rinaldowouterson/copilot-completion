@@ -32,131 +32,187 @@ export type FileKind =
 /**
  * Extension → FileKind mapping.
  *
- * Focuses on non-code file kinds. Code files are detected by the presence
- * of LSP symbols; if no symbols are found, the file kind still tells us
- * what sort of file we're dealing with.
+ * Single authoritative map. Every known extension maps to exactly one FileKind.
+ * If an extension isn't here, `inferFileKind` / `inferFileKindFromExtension`
+ * return `'unknown'`.
+ *
+ * Maintained in alphabetical order within each category for easy scanning.
  */
-const EXTENSION_MAP: Record<string, FileKind> = {
-    // ── Images ──
-    'png': 'image',
-    'jpg': 'image',
-    'jpeg': 'image',
-    'gif': 'image',
-    'svg': 'image',
-    'webp': 'image',
-    'bmp': 'image',
-    'ico': 'image',
-    'tiff': 'image',
-    'tif': 'image',
-    'avif': 'image',
+const EXT_TO_KIND: Record<string, FileKind> = {
+    // ── Archives ──
+    '7z': 'archive',
+    'bz2': 'archive',
+    'gz': 'archive',
+    'gzip': 'archive',
+    'jar': 'archive',
+    'nupkg': 'archive',
+    'rar': 'archive',
+    'tar': 'archive',
+    'vsix': 'archive',
+    'whl': 'archive',
+    'xz': 'archive',
+    'zip': 'archive',
+    'zst': 'archive',
 
     // ── Audio ──
-    'mp3': 'audio',
-    'wav': 'audio',
-    'flac': 'audio',
-    'ogg': 'audio',
     'aac': 'audio',
-    'wma': 'audio',
+    'flac': 'audio',
     'm4a': 'audio',
+    'mp3': 'audio',
+    'ogg': 'audio',
     'opus': 'audio',
+    'wav': 'audio',
+    'wma': 'audio',
 
-    // ── Video ──
-    'mp4': 'video',
-    'avi': 'video',
-    'mov': 'video',
-    'mkv': 'video',
-    'webm': 'video',
-    'wmv': 'video',
-    'm4v': 'video',
+    // ── Binary / other ──
+    'a': 'binary',
+    'bin': 'binary',
+    'dat': 'binary',
+    'db': 'binary',
+    'dll': 'binary',
+    'dylib': 'binary',
+    'exe': 'binary',
+    'lib': 'binary',
+    'o': 'binary',
+    'obj': 'binary',
+    'so': 'binary',
+    'sqlite': 'binary',
+    'wasm': 'binary',
 
-    // ── Fonts ──
-    'woff': 'font',
-    'woff2': 'font',
-    'ttf': 'font',
-    'otf': 'font',
-    'eot': 'font',
+    // ── Code ──
+    'astro': 'code',
+    'bash': 'code',
+    'c': 'code',
+    'cjs': 'code',
+    'clj': 'code',
+    'cljs': 'code',
+    'cmake': 'code',
+    'cpp': 'code',
+    'cs': 'code',
+    'crystal': 'code',
+    'css': 'code',
+    'cts': 'code',
+    'd': 'code',
+    'dart': 'code',
+    'elm': 'code',
+    'erl': 'code',
+    'ex': 'code',
+    'exs': 'code',
+    'fish': 'code',
+    'fs': 'code',
+    'fsharp': 'code',
+    'go': 'code',
+    'gql': 'code',
+    'gradle': 'code',
+    'graphql': 'code',
+    'groovy': 'code',
+    'h': 'code',
+    'hpp': 'code',
+    'hrl': 'code',
+    'hs': 'code',
+    'inc': 'code',
+    'java': 'code',
+    'js': 'code',
+    'jsx': 'code',
+    'kt': 'code',
+    'kts': 'code',
+    'less': 'code',
+    'lua': 'code',
+    'makefile': 'code',
+    'mjs': 'code',
+    'ml': 'code',
+    'mli': 'code',
+    'mts': 'code',
+    'nim': 'code',
+    'ocaml': 'code',
+    'pas': 'code',
+    'php': 'code',
+    'pl': 'code',
+    'pm': 'code',
+    'pp': 'code',
+    'py': 'code',
+    'r': 'code',
+    'rb': 'code',
+    'rmd': 'code',
+    'rs': 'code',
+    'scala': 'code',
+    'scss': 'code',
+    'sh': 'code',
+    'sql': 'code',
+    'styl': 'code',
+    'svelte': 'code',
+    'swift': 'code',
+    't': 'code',
+    'ts': 'code',
+    'tsx': 'code',
+    'vue': 'code',
+    'zsh': 'code',
+    'zig': 'code',
 
     // ── Data / config ──
+    'cfg': 'data',
+    'conf': 'data',
+    'csv': 'data',
+    'ini': 'data',
     'json': 'data',
     'jsonc': 'data',
-    'csv': 'data',
+    'toml': 'data',
     'tsv': 'data',
     'xml': 'data',
     'yaml': 'data',
     'yml': 'data',
-    'toml': 'data',
-    'ini': 'data',
-    'cfg': 'data',
-    'conf': 'data',
 
     // ── Documents ──
-    'pdf': 'document',
-    'md': 'document',
-    'markdown': 'document',
-    'rst': 'document',
-    'txt': 'document',
     'doc': 'document',
     'docx': 'document',
-    'xls': 'document',
-    'xlsx': 'document',
+    'md': 'document',
+    'markdown': 'document',
+    'pdf': 'document',
     'ppt': 'document',
     'pptx': 'document',
+    'rst': 'document',
+    'txt': 'document',
+    'xls': 'document',
+    'xlsx': 'document',
 
-    // ── Archives ──
-    'zip': 'archive',
-    'tar': 'archive',
-    'gz': 'archive',
-    'gzip': 'archive',
-    'bz2': 'archive',
-    'xz': 'archive',
-    '7z': 'archive',
-    'rar': 'archive',
-    'zst': 'archive',
+    // ── Fonts ──
+    'eot': 'font',
+    'otf': 'font',
+    'ttf': 'font',
+    'woff': 'font',
+    'woff2': 'font',
 
-    // ── Binary / other ──
-    'exe': 'binary',
-    'dll': 'binary',
-    'so': 'binary',
-    'dylib': 'binary',
-    'wasm': 'binary',
-    'o': 'binary',
-    'a': 'binary',
-    'lib': 'binary',
-    'obj': 'binary',
-    'bin': 'binary',
-    'dat': 'binary',
-    'db': 'binary',
-    'sqlite': 'binary',
-    'whl': 'archive',
-    'vsix': 'archive',
-    'nupkg': 'archive',
-    'jar': 'archive',
+    // ── Images ──
+    'avif': 'image',
+    'bmp': 'image',
+    'gif': 'image',
+    'ico': 'image',
+    'jpeg': 'image',
+    'jpg': 'image',
+    'png': 'image',
+    'svg': 'image',
+    'tif': 'image',
+    'tiff': 'image',
+    'webp': 'image',
+
+    // ── Video ──
+    'avi': 'video',
+    'm4v': 'video',
+    'mkv': 'video',
+    'mov': 'video',
+    'mp4': 'video',
+    'webm': 'video',
+    'wmv': 'video',
 };
 
-/**
- * Known programming-language extensions that map to `'code'`.
- *
- * When an extension isn't in EXTENSION_MAP (non-code categories) and IS
- * a programming language, we return 'code'. This list is intentionally
- * incomplete — anything not matched by EXTENSION_MAP or CODE_EXTENSIONS
- * falls through to `'unknown'`.
- */
-const CODE_EXTENSIONS = new Set([
-    'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts',
-    'py', 'rs', 'go', 'java', 'cs', 'cpp', 'c', 'h', 'hpp',
-    'php', 'rb', 'dart', 'lua', 'kt', 'kts', 'swift',
-    'scala', 'clj', 'cljs', 'elm', 'hs', 'ml', 'mli',
-    'sql', 'graphql', 'gql',
-    'sh', 'bash', 'zsh', 'fish',
-    'css', 'scss', 'less', 'styl',
-    'vue', 'svelte', 'astro',
-    'pl', 'pm', 't', 'r', 'rmd',
-    'erl', 'hrl', 'ex', 'exs',
-    'zig', 'nim', 'crystal', 'ocaml', 'fsharp', 'fs',
-    'd', 'pas', 'pp', 'inc',
-    'cmake', 'makefile', 'gnumakefile',
-    'gradle', 'groovy',
-]);
+// ── Code "extensions" that aren't file extensions ──
+// Some VS Code language IDs use pseudo-extensions like 'gnumakefile',
+// 'makefile', 'dockerfile'. These have no dot — the extension lookup
+// returns empty string and we'd miss them. Handle via a secondary check.
+const FILENAME_OVERRIDES: Record<string, FileKind> = {
+    'gnumakefile': 'code',
+    'makefile': 'code',
+};
 
 /**
  * Infer file kind from a URI's file extension.
@@ -169,17 +225,19 @@ const CODE_EXTENSIONS = new Set([
  * @returns The detected FileKind.
  */
 export function inferFileKind(uri: vscode.Uri): FileKind {
+    // 1. Check extension-based map
     const basename = uri.fsPath;
     const dot = basename.lastIndexOf('.');
     const ext = dot >= 0 ? basename.slice(dot + 1).toLowerCase() : '';
-    if (!ext) return 'unknown';
+    if (ext) {
+        const mapped = EXT_TO_KIND[ext];
+        if (mapped) return mapped;
+    }
 
-    // Check non-code map first
-    const mapped = EXTENSION_MAP[ext];
-    if (mapped) return mapped;
-
-    // Check if it's a known code extension
-    if (CODE_EXTENSIONS.has(ext)) return 'code';
+    // 2. Check filename overrides (makefile, dockerfile, etc.)
+    const filename = basename.split('/').pop()?.toLowerCase() ?? '';
+    const override = FILENAME_OVERRIDES[filename];
+    if (override) return override;
 
     return 'unknown';
 }
@@ -187,17 +245,13 @@ export function inferFileKind(uri: vscode.Uri): FileKind {
 /**
  * Infer file kind from a file extension string (for use in contexts
  * where you don't have a full URI, e.g. test assertions).
+ *
+ * Unlike `inferFileKind`, this does NOT check `FILENAME_OVERRIDES`
+ * (makefile, etc.) because those aren't file-extension-based.
  */
 export function inferFileKindFromExtension(ext: string): FileKind {
     const clean = ext.toLowerCase().replace(/^\./, '');
-    if (!clean) return 'unknown';
-
-    const mapped = EXTENSION_MAP[clean];
-    if (mapped) return mapped;
-
-    if (CODE_EXTENSIONS.has(clean)) return 'code';
-
-    return 'unknown';
+    return EXT_TO_KIND[clean] ?? 'unknown';
 }
 
 /**
