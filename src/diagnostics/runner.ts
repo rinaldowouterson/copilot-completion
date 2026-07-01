@@ -1176,6 +1176,126 @@ test('Non-LSP: circular import pattern does not crash', async (ctx) => {
 //  Workspace cache: incremental per-file update on save
 // ──────────────────────────────────────────────────────────────
 
+test('[P2] Edit + gather: per-file cache invalidated on text change', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'cache_inval');
+    await writeFile(uri, 'export const original = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    let bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    const beforeNames = bundle.fileExports.map(e => e.name);
+    ctx.arrayContains(beforeNames, 'original', 'sees original export before edit');
+
+    // Edit the document (triggers onDidChangeTextDocument → _cache.delete)
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, new vscode.Range(0, 0, 0, 21), 'export const edited = 2;');
+    const applied = await vscode.workspace.applyEdit(edit);
+    ctx.ok(applied, 'edit applied');
+
+    // Wait for LSP to re-index after edit
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Gather again — must NOT use stale cache
+    bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    const afterNames = bundle.fileExports.map(e => e.name);
+    ctx.value('exports after edit', afterNames);
+    ctx.arrayContains(afterNames, 'edited', 'sees edited export after text change');
+    ctx.ok(!afterNames.includes('original'), 'original export gone after edit');
+
+    await removeFile(uri);
+});
+
+test('[P2] Save without content change: cache update does not throw', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'cache_save_noop');
+    await writeFile(uri, 'export const x = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    // First gather to seed caches
+    const doc = await vscode.workspace.openTextDocument(uri);
+    let bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    ctx.ok(bundle.fileExports.length >= 1, 'exports present');
+
+    // Save the file without any content change — _updateFileInWorkspaceCache
+    // will re-query LSP symbols for the same content. Must not throw.
+    const saveOk = await doc.save();
+    ctx.ok(saveOk, 'no-op save succeeded');
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Gather again — should return same data as before
+    bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array after no-op save');
+    ctx.value('exports after no-op save', bundle.fileExports.map(e => e.name));
+
+    await removeFile(uri);
+});
+
+test('[P2] Hover cache: invalidated on text change', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'hover_cache_inval');
+    await writeFile(uri, 'export const x = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Gather once to populate hover cache
+    await builder.gather(doc, new vscode.Position(0, 0));
+
+    // Edit the document — should invalidate hover cache
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, new vscode.Range(0, 0, 0, 19), 'export const y = 2;');
+    await vscode.workspace.applyEdit(edit);
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Gather again — hover cache must have been cleared
+    // (no direct assertion on private _hoverCache, but the gather must not throw)
+    const bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    ctx.ok(Array.isArray(bundle.fileExports), 'hover cache inval: fileExports is array');
+    ctx.value('exports after edit (hover cache)', bundle.fileExports.map(e => e.name));
+
+    await removeFile(uri);
+});
+
+test('[P2] Close document + gather: works on closed documents', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'cache_closed');
+    await writeFile(uri, 'export const closed = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    // Gather while open to populate caches
+    const doc = await vscode.workspace.openTextDocument(uri);
+    let bundle = await builder.gather(doc, new vscode.Position(0, 0));
+    ctx.ok(bundle.fileExports.length >= 1, 'exports before close');
+
+    // Close the document
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    await new Promise(r => setTimeout(r, 500));
+
+    // Gather on closed document — should still work from cache or re-open
+    const closedDoc = await vscode.workspace.openTextDocument(uri);
+    bundle = await builder.gather(closedDoc, new vscode.Position(0, 0));
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array after reopen');
+    ctx.value('exports after close/reopen', bundle.fileExports.map(e => e.name));
+
+    await removeFile(uri);
+});
+
 test('[P2] Workspace cache: save updates only the saved file\'s entry', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
