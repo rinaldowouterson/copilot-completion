@@ -173,7 +173,7 @@ export function findStatementEndHeuristic(
     if (lines.length === 0) return 0;
     const safeStart = Math.max(0, Math.min(startLine, lines.length - 1));
     const endOfDoc = lines.length - 1;
-    const budgetEnd = Math.min(safeStart + maxLines, endOfDoc);
+    const budgetEnd = Math.max(safeStart, Math.min(safeStart + maxLines - 1, endOfDoc));
     const baseIndent = guessIndent(lines[safeStart]);
 
     let bracketDepth = 0;
