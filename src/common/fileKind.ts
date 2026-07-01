@@ -11,7 +11,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 
 /**
  * High-level file kind categories.
@@ -170,7 +169,9 @@ const CODE_EXTENSIONS = new Set([
  * @returns The detected FileKind.
  */
 export function inferFileKind(uri: vscode.Uri): FileKind {
-    const ext = path.extname(uri.fsPath).toLowerCase().replace(/^\./, '');
+    const basename = uri.fsPath;
+    const dot = basename.lastIndexOf('.');
+    const ext = dot >= 0 ? basename.slice(dot + 1).toLowerCase() : '';
     if (!ext) return 'unknown';
 
     // Check non-code map first
