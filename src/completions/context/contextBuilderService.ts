@@ -10,6 +10,7 @@ import {
     LanguageSyntax,
 } from '../../common/contextBundle';
 import { getSyntax, findStatementEnd } from '../../common/languageSyntax';
+import { inferFileKind, type FileKind } from '../../common/fileKind';
 import { LRUCacheMap } from '../../common/lruCacheMap';
 import { ILogService } from '../shared/log/logService';
 import { resolveRelativePath } from './relativePath';
@@ -480,6 +481,26 @@ export class ContextBuilderService implements IContextBuilderService {
             chainSeen.add(targetUriStr);
             globalSeen.add(targetUriStr);
 
+            // Phase A: relative path is mandatory
+            const relativePath = resolveRelativePath(sourceUri, targetUri);
+
+            // Detect file kind from extension BEFORE opening the document.
+            // Non-text files (image, audio, video, font, archive, binary) are
+            // resolved with just the path and kind — no heavy processing.
+            const fileKind = inferFileKind(targetUri);
+            const textKinds: ReadonlySet<FileKind> = new Set(['code', 'data', 'document', 'unknown']);
+
+            if (!textKinds.has(fileKind)) {
+                // Non-text file — record the import but skip symbol/signature processing
+                resolved.push({
+                    uri: targetUriStr,
+                    relativePath,
+                    exports: [],
+                    fileKind,
+                });
+                continue;
+            }
+
             try {
                 const targetDoc = await vscode.workspace.openTextDocument(targetUri);
                 const targetKey = targetDoc.uri.toString();
@@ -506,13 +527,11 @@ export class ContextBuilderService implements IContextBuilderService {
                     typeSignatures = await this._fetchTopHoverSignatures(targetDoc, exports);
                 }
 
-                // Phase A: relative path is mandatory
-                const relativePath = resolveRelativePath(sourceUri, targetUri);
-
                 resolved.push({
                     uri: targetUriStr,
                     relativePath,
                     exports,
+                    fileKind,
                     typeSignatures,
                 });
             } catch {

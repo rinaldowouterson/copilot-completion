@@ -7,6 +7,8 @@
  * comment lines for GHOST, <|tags|> for NES).
  */
 
+import type { FileKind } from './fileKind';
+
 /** Language-specific syntax rules for heuristic statement-end detection. */
 export interface LanguageSyntax {
     /** Whether this language requires semicolons at statement end (TS, JS, C, etc.) */
@@ -69,6 +71,14 @@ export interface ImportResolution {
      * Keyed by `FileExport.name`. Formatters prefer `name:type` when present.
      */
     typeSignatures?: Record<string, string>;
+    /**
+     * The kind of file that was imported (code, image, audio, font, etc.).
+     * Detected from the file extension during import resolution.
+     * `'code'` for known programming languages, `'unknown'` for unrecognised
+     * extensions. Consumers (GHOST/NES prompt factories) can use this to
+     * skip non-code imports or format them differently.
+     */
+    fileKind: FileKind;
 }
 
 /** The enclosing scope around the cursor position. */

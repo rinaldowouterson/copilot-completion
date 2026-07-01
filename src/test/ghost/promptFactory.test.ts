@@ -181,6 +181,7 @@ suite('GhostPromptFactory', () => {
                     { name: 'formatDate', kind: 'Function', line: 1, type: '(d: Date): string' },
                 ],
                 typeSignatures: { formatDate: '(d: Date): string' },
+                fileKind: 'code',
             },
         ];
         const context: ContextBundle = {

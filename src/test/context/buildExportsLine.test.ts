@@ -108,6 +108,7 @@ suite('buildImportLine (relative path mandatory)', () => {
             exports: [
                 { name: 'formatDate', kind: 'Function', line: 1, type: '(d: Date) => string' },
             ],
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         assert.ok(out.startsWith('./utils/helpers.ts:'),
@@ -122,6 +123,7 @@ suite('buildImportLine (relative path mandatory)', () => {
             relativePath: './utils.ts',
             exports: [{ name: 'parseISO', kind: 'Function', line: 1 }],
             typeSignatures: { parseISO: '(s: string) => Date' },
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         assert.ok(out.includes('parseISO:(s: string) => Date'),
@@ -133,6 +135,7 @@ suite('buildImportLine (relative path mandatory)', () => {
             uri: 'file:///abs/utils.ts',
             relativePath: './utils.ts',
             exports: [{ name: 'parseISO', kind: 'Function', line: 1 }],
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         assert.ok(out.includes('parseISO:Function'));
@@ -150,6 +153,7 @@ suite('buildImportLine (relative path mandatory)', () => {
             uri: 'file:///abs/many.ts',
             relativePath: './many.ts',
             exports,
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         // First 8 should be included
@@ -167,6 +171,7 @@ suite('buildImportLine (relative path mandatory)', () => {
             uri: 'file:///abs/empty.ts',
             relativePath: './empty.ts',
             exports: [],
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         assert.strictEqual(out, './empty.ts: ');
@@ -180,6 +185,7 @@ suite('buildImportLine (relative path mandatory)', () => {
                 { name: 'a', kind: 'UnknownKind', line: 1 },
                 { name: 'b', kind: '', line: 2 },  // empty kind
             ],
+            fileKind: 'code',
         };
         const out = buildImportLine(imp);
         assert.ok(out.includes('a:UnknownKind'));

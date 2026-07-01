@@ -22,6 +22,7 @@ import { ContextBuilderService, normalizePath, extractRelativeImportSpecifiers }
 import { LogService } from '../completions/shared/log/logService';
 import { LANG_TO_LSP_EXTENSIONS, extensionUriFor, hasLspSupport } from '../completions/context/lspSupport';
 import { cleanHoverSignature } from '../completions/context/hoverEnrichment';
+import { inferFileKindFromExtension, isBinaryKind } from '../common/fileKind';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -628,12 +629,14 @@ test('Phase C: hover enrichment provides type signatures', async (ctx) => {
     ctx.ok(Array.isArray(bundle.fileExports), 'Phase C: fileExports is array');
     ctx.value('Phase C: fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`));
 
-    // ── Hover data (typeSignatures) raw dump ──
+    // ── Hover data (typeSignatures) + fileKind raw dump ──
     if (bundle.importResolutions.length > 0) {
         const imp = bundle.importResolutions[0];
         ctx.value('Phase C: import[0] uri', imp.uri);
         ctx.value('Phase C: import[0] relativePath', imp.relativePath);
         ctx.value('Phase C: import[0] exports', imp.exports.map(e => `${e.name}:${e.kind}`).join(' | '));
+        ctx.value('Phase C: import[0] fileKind', imp.fileKind);
+        ctx.equal(imp.fileKind, 'code', 'Phase C: import[0] fileKind is "code" for .ts file');
 
         if (imp.typeSignatures) {
             const keys = Object.keys(imp.typeSignatures);
@@ -1128,6 +1131,121 @@ test('hasLspSupport: returns true for TypeScript files', async (ctx) => {
     const supported = await hasLspSupport(doc);
     ctx.ok(supported, 'TypeScript file has LSP support');
     await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  FileKind detection (Phase A enrichment)
+// ──────────────────────────────────────────────────────────────
+
+test('fileKind: inferFileKindFromExtension maps extensions correctly', async (ctx) => {
+    // ── Code files ──
+    ctx.equal(inferFileKindFromExtension('.ts'), 'code', '.ts → code');
+    ctx.equal(inferFileKindFromExtension('.py'), 'code', '.py → code');
+    ctx.equal(inferFileKindFromExtension('.rs'), 'code', '.rs → code');
+    ctx.equal(inferFileKindFromExtension('.jsx'), 'code', '.jsx → code');
+
+    // ── Images ──
+    ctx.equal(inferFileKindFromExtension('.png'), 'image', '.png → image');
+    ctx.equal(inferFileKindFromExtension('.jpg'), 'image', '.jpg → image');
+    ctx.equal(inferFileKindFromExtension('.svg'), 'image', '.svg → image');
+    ctx.equal(inferFileKindFromExtension('.webp'), 'image', '.webp → image');
+
+    // ── Audio ──
+    ctx.equal(inferFileKindFromExtension('.mp3'), 'audio', '.mp3 → audio');
+    ctx.equal(inferFileKindFromExtension('.wav'), 'audio', '.wav → audio');
+    ctx.equal(inferFileKindFromExtension('.flac'), 'audio', '.flac → audio');
+
+    // ── Video ──
+    ctx.equal(inferFileKindFromExtension('.mp4'), 'video', '.mp4 → video');
+    ctx.equal(inferFileKindFromExtension('.webm'), 'video', '.webm → video');
+
+    // ── Fonts ──
+    ctx.equal(inferFileKindFromExtension('.woff2'), 'font', '.woff2 → font');
+    ctx.equal(inferFileKindFromExtension('.ttf'), 'font', '.ttf → font');
+
+    // ── Data / config ──
+    ctx.equal(inferFileKindFromExtension('.json'), 'data', '.json → data');
+    ctx.equal(inferFileKindFromExtension('.csv'), 'data', '.csv → data');
+    ctx.equal(inferFileKindFromExtension('.yaml'), 'data', '.yaml → data');
+    ctx.equal(inferFileKindFromExtension('.toml'), 'data', '.toml → data');
+
+    // ── Documents ──
+    ctx.equal(inferFileKindFromExtension('.pdf'), 'document', '.pdf → document');
+    ctx.equal(inferFileKindFromExtension('.md'), 'document', '.md → document');
+
+    // ── Archives ──
+    ctx.equal(inferFileKindFromExtension('.zip'), 'archive', '.zip → archive');
+    ctx.equal(inferFileKindFromExtension('.tar.gz'), 'unknown', '.tar.gz → unknown (no double-ext handling)');
+    // Note: double extensions like .tar.gz are not handled — only the last ext is checked.
+    // That's fine: .gz alone maps to 'archive'.
+
+    // ── Binary / other ──
+    ctx.equal(inferFileKindFromExtension('.wasm'), 'binary', '.wasm → binary');
+    ctx.equal(inferFileKindFromExtension('.exe'), 'binary', '.exe → binary');
+    ctx.equal(inferFileKindFromExtension('.dll'), 'binary', '.dll → binary');
+
+    // ── Edge cases ──
+    ctx.equal(inferFileKindFromExtension(''), 'unknown', 'empty → unknown');
+    ctx.equal(inferFileKindFromExtension('.unknown'), 'unknown', '.unknown → unknown');
+    ctx.equal(inferFileKindFromExtension('TS'), 'code', '.TS uppercase → code (case-insensitive)');
+    ctx.equal(inferFileKindFromExtension('.PNG'), 'image', '.PNG uppercase → image');
+});
+
+test('fileKind: isBinaryKind classifies correctly', async (ctx) => {
+    ctx.ok(isBinaryKind('image'), 'image is binary');
+    ctx.ok(isBinaryKind('audio'), 'audio is binary');
+    ctx.ok(isBinaryKind('video'), 'video is binary');
+    ctx.ok(isBinaryKind('font'), 'font is binary');
+    ctx.ok(isBinaryKind('archive'), 'archive is binary');
+    ctx.ok(isBinaryKind('binary'), 'binary is binary');
+    ctx.ok(!isBinaryKind('code'), 'code is not binary');
+    ctx.ok(!isBinaryKind('data'), 'data is not binary');
+    ctx.ok(!isBinaryKind('document'), 'document is not binary');
+    ctx.ok(!isBinaryKind('unknown'), 'unknown is not binary');
+});
+
+test('fileKind: JSON file import resolves with fileKind "data"', async (ctx) => {
+    // This integration test verifies that importing a non-code file
+    // (JSON) correctly carries the 'data' fileKind in the bundle.
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const jsonUri = tmpUri('.json', 'filekind_json');
+    const sourceUri = tmpUri('.ts', 'filekind_source');
+
+    await writeFile(jsonUri, JSON.stringify({ name: 'test', version: '1.0.0', dependencies: {} }, null, 2));
+
+    const jsonName = path.basename(jsonUri.path).replace(/\.json$/, '');
+    await writeFile(sourceUri, [
+        `import * as cfg from './${jsonName}.json';`,
+        '',
+        'console.log(cfg.name);',
+    ].join('\n'));
+
+    await openDocument(jsonUri);
+    await openDocument(sourceUri);
+    await waitForLsp(jsonUri, 10_000);
+    await waitForLsp(sourceUri, 5_000);
+
+    const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
+    const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 15));
+
+    ctx.ok(Array.isArray(bundle.importResolutions), 'fileKind JSON: importResolutions is array');
+    ctx.value('fileKind JSON: importResolutions count', bundle.importResolutions.length);
+
+    if (bundle.importResolutions.length > 0) {
+        const imp = bundle.importResolutions[0];
+        ctx.value('fileKind JSON: import[0].fileKind', imp.fileKind);
+        ctx.value('fileKind JSON: import[0].relativePath', imp.relativePath);
+        ctx.equal(imp.fileKind, 'data', 'fileKind JSON: fileKind is "data" for .json import');
+        ctx.value('fileKind JSON: exports', imp.exports.map(e => `${e.name}:${e.kind}`).join(' | '));
+    } else {
+        ctx.value('fileKind JSON', 'no import resolutions — LSP link provider may not have resolved the JSON import');
+    }
+
+    await removeFile(jsonUri);
+    await removeFile(sourceUri);
 });
 
 test('public detectMissingImports() returns array for clean file', async (ctx) => {
