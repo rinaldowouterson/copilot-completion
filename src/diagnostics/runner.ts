@@ -72,6 +72,7 @@ async function openDocument(uri: vscode.Uri): Promise<vscode.TextDocument> {
 async function waitForLsp(
     uri: vscode.Uri,
     timeoutMs: number = 1500,
+    eventsToWaitFor: number = 1,
 ): Promise<{ ok: boolean; symbols?: vscode.DocumentSymbol[]; error?: string; attemptCount: number }> {
     let attemptCount = 0;
     let firstError: string | undefined;
@@ -90,13 +91,19 @@ async function waitForLsp(
         return undefined;
     };
 
-    // Subscribe to diagnostics before yielding — the LS fires this when it
-    // finishes processing. We park on this single Promise; no polling.
-    const diagnosticsFired = new Promise<boolean>(resolve => {
+    // Subscribe to diagnostics. Some LSPs fire onDidChangeDiagnostics multiple
+    // times: first from a quick syntax-check pass (empty), later when the full
+    // IntelliSense engine is ready (has symbols). `eventsToWaitFor` lets callers
+    // skip the initial noise events and fetch only after the Nth event.
+    let eventsSeen = 0;
+    const diagnosticsReady = new Promise<boolean>(resolve => {
         const d = vscode.languages.onDidChangeDiagnostics(e => {
             if (e.uris.some(u => u.toString() === uriStr)) {
-                d.dispose();
-                resolve(true);
+                eventsSeen++;
+                if (eventsSeen >= eventsToWaitFor) {
+                    d.dispose();
+                    resolve(true);
+                }
             }
         });
         setTimeout(() => {
@@ -105,8 +112,7 @@ async function waitForLsp(
         }, timeoutMs);
     });
 
-    // Wait for the LS to signal readiness (or timeout for non-compliant LSPs)
-    const fired = await diagnosticsFired;
+    const fired = await diagnosticsReady;
     if (fired) {
         const s = await tryFetch();
         if (s) return { ok: true, symbols: s, attemptCount };
@@ -367,9 +373,24 @@ interface TestResult {
 
 const tests: Array<{ name: string; fn: (ctx: AssertLogger) => Promise<void> }> = [];
 
+/** @internal Which test (if any) is marked with `.only()`. */
+let _onlyTestName: string | undefined;
+
 function test(name: string, fn: (ctx: AssertLogger) => Promise<void>): void {
     tests.push({ name, fn });
 }
+
+/**
+ * Mark a single test to run in isolation. All other tests are skipped.
+ * Works like vitest's `it.only(name, fn)`. Only the LAST `.only()` call
+ * takes effect.
+ *
+ * Usage: replace `test('PHP test', ...)` with `test.only('PHP test', ...)`
+ */
+test.only = function only(name: string, fn: (ctx: AssertLogger) => Promise<void>): void {
+    tests.push({ name, fn });
+    _onlyTestName = name; // last one wins
+};
 
 // ──────────────────────────────────────────────────────────────
 //  Environment landscape (runs first — shows what's installed)
@@ -668,13 +689,14 @@ async function testLspDetection(
     ext: string,
     content: string,
     languageId: string,
-    timeoutMs: number = 1500,
+    timeoutMs: number = 5000,
+    eventsToWaitFor: number = 1,
 ): Promise<void> {
     const uri = tmpUri(ext, `lsp_${label}`);
     await writeFile(uri, content);
     await openDocument(uri);
     const t0 = Date.now();
-    const result = await waitForLsp(uri, timeoutMs);
+    const result = await waitForLsp(uri, timeoutMs, eventsToWaitFor);
     const elapsed = Date.now() - t0;
 
     // ── Assertion 1: waitForLsp completed and returned a structured result ──
@@ -687,12 +709,19 @@ async function testLspDetection(
     }
 
     // ── Log ALL extensions that claim this language (active or not) ──
+    // Some extensions (e.g. ms-dotnettools.csharp) don't list the language
+    // in `contributes.languages` but DO register via `activationEvents`
+    // with `onLanguage:{languageId}`. Check both sources.
+    const onLangEvent = `onLanguage:${languageId}`;
     const allForLang = vscode.extensions.all
-        .filter(ex =>
-            ex.packageJSON?.contributes?.languages?.some(
-                (l: { id: string }) => l.id === languageId
-            )
-        )
+        .filter(ex => {
+            const pkg = ex.packageJSON;
+            // Direct language contribution (most extensions)
+            if (pkg?.contributes?.languages?.some((l: { id: string }) => l.id === languageId)) return true;
+            // Activation-event based registration (e.g. C# via onLanguage:csharp)
+            if (Array.isArray(pkg?.activationEvents) && pkg.activationEvents.includes(onLangEvent)) return true;
+            return false;
+        })
         .map(ex => ({ id: ex.id, active: ex.isActive, version: ex.packageJSON.version }));
     if (allForLang.length > 0) {
         for (const ex of allForLang) {
@@ -751,26 +780,48 @@ test('LSP: Rust (rust-analyzer) responds with symbols', async (ctx) => {
 });
 
 test('LSP: Java (redhat.java) responds with symbols', async (ctx) => {
+    // JDT Language Server has a cold-start boot of Eclipse Equinox + OSGi,
+    // which takes longer than the default 1500ms on first load. Give it 5s.
     await testLspDetection(ctx, 'java', '.java',
-        'public class Hello {\n    public static void main(String[] args) {}\n}\n', 'java');
+        'public class Hello {\n    public static void main(String[] args) {}\n}\n', 'java', 5_000);
 });
 
 test('LSP: C# (ms-dotnettools.csharp) responds with symbols', async (ctx) => {
     await testLspDetection(ctx, 'csharp', '.cs',
-        'class Hello { static void Main() {} }\n', 'csharp');
+        'class Hello { static void Main() {} }\n', 'csharp', 5000);
 });
 
 test('LSP: C/C++ (ms-vscode.cpptools) responds with symbols', async (ctx) => {
-    await testLspDetection(ctx, 'cpp', '.cpp', 'int main() { return 0; }\n', 'cpp');
+    // cpptools scans system headers on cold start, which delays first
+    // diagnostics by several seconds. Give it the same 5s window as Java.
+    await testLspDetection(ctx, 'cpp', '.cpp', 'int main() { return 0; }\n', 'cpp', 5_000);
     await testLspDetection(ctx, 'c', '.c', 'int main() { return 0; }\n', 'c');
 });
 
+/**
+ * PHP-specific LSP test with extended diagnostics.
+ *
+ * VS Code's built-in `vscode.php-language-features` provides IntelliSense
+ * (completions, hover, document symbols) without a separate LSP server.
+ * It activates on `onLanguage:php`. Unlike full LSPs (Pylance, rust-analyzer),
+ * it does NOT use `DiagnosticCollection.set()`, which means `onDidChangeDiagnostics`
+ * may not fire for symbol resolution — only for syntax errors.
+ *
+ * This test uses the generic `waitForLsp` but adds PHP-specific runtime checks
+ * and fallback polling so we can distinguish "LSP not responding" from
+ * "LSP doesn't use diagnostics events."
+ */
 test('LSP: PHP responds with symbols', async (ctx) => {
-    await testLspDetection(ctx, 'php', '.php', '<?php function greet($name) { return "hello $name"; }\n', 'php');
+    // Event-driven via testLspDetection (same pattern as Java, C++, Rust).
+    // PHP's built-in IntelliSense engine fires onDidChangeDiagnostics twice:
+    //   event #1 at ~268ms — syntax check (no symbols)
+    //   event #2 at ~1752ms — IntelliSense ready (symbols present)
+    // By waiting for 2 events, we skip the noise and fetch exactly when ready.
+    await testLspDetection(ctx, 'php', '.php', '<?php function greet($name) { return "hello $name"; }\n', 'php', 5000, 2);
 });
 
 test('LSP: Ruby (Ruby LSP) responds with symbols', async (ctx) => {
-    await testLspDetection(ctx, 'ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n', 'ruby');
+    await testLspDetection(ctx, 'ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n', 'ruby',10000);
 });
 
 test('LSP: Dart responds with symbols', async (ctx) => {
@@ -3075,9 +3126,39 @@ export async function runAllDiagnostics(
     }
 
     channel.appendLine(`[config] fail-fast: enabled — runner stops on first failure`);
+    if (_onlyTestName) {
+        channel.appendLine(`[config] test.only mode: only "${_onlyTestName}" will run (${tests.length - 1} others skipped)`);
+    }
     channel.appendLine('');
 
+    // ── Diagnostic event spy (additive — does not modify waitForLsp) ──
+    // Logs every onDidChangeDiagnostics event with URI and elapsed time.
+    // Helps distinguish "LSP fires once at 172ms (syntax check only)" from
+    // "LSP fires at 172ms AND again at 3400ms (symbols ready)."
+    const diagEventCounts = new Map<string, number>();
+    const diagSpyStart = Date.now();
+    const diagSpy = vscode.languages.onDidChangeDiagnostics(e => {
+        try {
+            for (const u of e.uris) {
+                const uriStr = u.toString();
+                const count = (diagEventCounts.get(uriStr) ?? 0) + 1;
+                diagEventCounts.set(uriStr, count);
+                const elapsed = Date.now() - diagSpyStart;
+                const shortUri = uriStr.includes('__cc_diag_')
+                    ? uriStr.substring(uriStr.lastIndexOf('/') + 1)
+                    : uriStr;
+                channel.appendLine(`  [diag] event #${count} at +${elapsed}ms for ${shortUri}`);
+            }
+        } catch (err) {
+            channel.appendLine(`  [diag] ERROR in spy: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    });
+    channel.appendLine(`  [diag] spy registered at t=0`);
+
     for (const t of tests) {
+        // When a test is marked with .only(), skip everything except it
+        if (_onlyTestName && t.name !== _onlyTestName) continue;
+
         const ctx = new AssertLogger(channel);
         // Separator line for readability between tests
         channel.appendLine('');
@@ -3096,6 +3177,9 @@ export async function runAllDiagnostics(
             break;
         }
     }
+
+    // Dispose the diagnostic event spy
+    diagSpy.dispose();
 
     // Post-flight cleanup: kill any untitled tabs this run created. Even with
     // per-test closeUntitledDoc calls, a test that throws mid-way, or one that
