@@ -172,13 +172,14 @@ export function findStatementEndHeuristic(
     // Defensive: empty document or startLine past end → return what's safe
     if (lines.length === 0) return 0;
     const safeStart = Math.max(0, Math.min(startLine, lines.length - 1));
-    const endOfDoc = lines.length - 1;
     const baseIndent = guessIndent(lines[safeStart]);
+
+    // Exclusive bound: don't scan past the budget or the document
+    const scanEnd = Math.min(lines.length, safeStart + maxLines);
 
     let bracketDepth = 0;
 
-    // Scan at most maxLines lines (exclusive bound)
-    for (let line = safeStart; line < safeStart + maxLines && line <= endOfDoc; line++) {
+    for (let line = safeStart; line < scanEnd; line++) {
         const text = lines[line];
         if (text === undefined) continue;
         const trimmed = text.trim();
@@ -225,7 +226,7 @@ export function findStatementEndHeuristic(
         }
 
         // Rule 5: next line starts with continuation operator prefix → belongs to same statement
-        if (line < endOfDoc) {
+        if (line + 1 < lines.length) {
             const nextLine = lines[line + 1].trim();
             if (nextLine.startsWith('.') || nextLine.startsWith('?.') || nextLine.startsWith('[')) continue;
         }
@@ -240,10 +241,8 @@ export function findStatementEndHeuristic(
         return line - 1;
     }
 
-    // Budget cap reached — return the last line scanned (don't exceed document)
-    return safeStart + maxLines <= endOfDoc
-        ? safeStart + maxLines - 1
-        : endOfDoc;
+    // Budget cap reached — the last line scanned was the one before scanEnd
+    return scanEnd - 1;
 }
 
 /**
