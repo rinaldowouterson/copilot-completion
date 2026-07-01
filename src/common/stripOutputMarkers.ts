@@ -86,13 +86,14 @@ function buildMarkerPattern(): RegExp {
 
 const START_RE = buildMarkerPattern();
 // End pattern: same markers but anchored to end-of-string, with optional
-// trailing whitespace/newlines BETWEEN markers.
-const END_RE = new RegExp(`(?:${[...MARKERS].sort((a, b) => b.length - a.length).map(m => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})+$`, '');
+// whitespace/newlines BEFORE the markers (e.g. `code\n<|marker|>`).
+const END_RE = new RegExp(`(?:\\s*${[...MARKERS].sort((a, b) => b.length - a.length).map(m => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})+$`, '');
 
 /**
  * Strip known prompt markers from the *beginning* of `text`.
  *
- * Handles chained markers: `<|imports|><|cursor|>actual code` → `actual code`
+ * Handles chained markers: `<|imports|><|cursor|>actual code` → `actual code`.
+ * Also consumes any whitespace/newlines after the last marker.
  */
 export function stripStartMarkers(text: string): string {
     let prev: string;
@@ -100,13 +101,16 @@ export function stripStartMarkers(text: string): string {
         prev = text;
         text = text.replace(START_RE, '');
     } while (text !== prev);
+    // Strip leading whitespace/newlines left after markers were removed
+    text = text.replace(/^\s+/, '');
     return text;
 }
 
 /**
  * Strip known prompt markers from the *end* of `text`.
  *
- * Handles chained markers: `actual code<|cursor|></imports>` → `actual code`
+ * Handles chained markers: `actual code<|cursor|></imports>` → `actual code`.
+ * Also strips trailing newlines after marker removal.
  */
 export function stripEndMarkers(text: string): string {
     let prev: string;
@@ -114,6 +118,8 @@ export function stripEndMarkers(text: string): string {
         prev = text;
         text = text.replace(END_RE, '');
     } while (text !== prev);
+    // Strip trailing whitespace/newlines left after marker removal
+    text = text.replace(/\s+$/, '');
     return text;
 }
 
