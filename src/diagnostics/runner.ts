@@ -72,11 +72,10 @@ async function openDocument(uri: vscode.Uri): Promise<vscode.TextDocument> {
 async function waitForLsp(
     uri: vscode.Uri,
     timeoutMs: number = 1500,
-    eventsToWaitFor: number = 1,
 ): Promise<{ ok: boolean; symbols?: vscode.DocumentSymbol[]; error?: string; attemptCount: number }> {
     let attemptCount = 0;
     let firstError: string | undefined;
-    const uriStr = uri.toString();
+    const deadline = Date.now() + timeoutMs;
 
     const tryFetch = async (): Promise<vscode.DocumentSymbol[] | undefined> => {
         attemptCount++;
@@ -91,33 +90,36 @@ async function waitForLsp(
         return undefined;
     };
 
-    // Subscribe to diagnostics. Some LSPs fire onDidChangeDiagnostics multiple
-    // times: first from a quick syntax-check pass (empty), later when the full
-    // IntelliSense engine is ready (has symbols). `eventsToWaitFor` lets callers
-    // skip the initial noise events and fetch only after the Nth event.
-    let eventsSeen = 0;
-    const diagnosticsReady = new Promise<boolean>(resolve => {
-        const d = vscode.languages.onDidChangeDiagnostics(e => {
-            if (e.uris.some(u => u.toString() === uriStr)) {
-                eventsSeen++;
-                if (eventsSeen >= eventsToWaitFor) {
-                    d.dispose();
-                    resolve(true);
-                }
-            }
-        });
-        setTimeout(() => {
-            d.dispose();
-            resolve(false);
-        }, timeoutMs);
+    // Try once immediately — the LSP may already be warm from a previous file
+    const immediate = await tryFetch();
+    if (immediate) return { ok: true, symbols: immediate, attemptCount };
+
+    // Subscribe to onDidChangeDiagnostics as a hint: the event fires when the
+    // LSP has started processing the file. We do NOT gate the fetch on this
+    // event, because for some LSPs (Ruby LSP, TS files outside workspace)
+    // the event either never fires or fires before symbols are indexed.
+    // Instead we keep polling executeDocumentSymbolProvider so we catch
+    // symbols as soon as they become available, event or not.
+    const uriStr = uri.toString();
+    const diagListener = vscode.languages.onDidChangeDiagnostics((): void => {
+        // Fire-and-forget: the spy logs these events. We don't gate on them.
     });
 
-    const fired = await diagnosticsReady;
-    if (fired) {
+    // Poll executeDocumentSymbolProvider every 200ms until we get symbols
+    // or hit the deadline. This handles:
+    //   - LSP fires event "too early" (before symbols are ready)
+    //   - LSP never fires events (temp files outside workspace)
+    //   - LSP is slow to index (Ruby LSP's "Determined that document should be indexed")
+    while (Date.now() < deadline) {
         const s = await tryFetch();
-        if (s) return { ok: true, symbols: s, attemptCount };
+        if (s) {
+            diagListener.dispose();
+            return { ok: true, symbols: s, attemptCount };
+        }
+        await new Promise(r => setTimeout(r, 200));
     }
 
+    diagListener.dispose();
     return { ok: false, error: firstError, attemptCount };
 }
 
@@ -728,13 +730,12 @@ async function testLspDetection(
     content: string,
     languageId: string,
     timeoutMs: number = 5000,
-    eventsToWaitFor: number = 1,
 ): Promise<void> {
     const uri = tmpUri(ext, `lsp_${label}`);
     await writeFile(uri, content);
     await openDocument(uri);
     const t0 = Date.now();
-    const result = await waitForLsp(uri, timeoutMs, eventsToWaitFor);
+    const result = await waitForLsp(uri, timeoutMs);
     const elapsed = Date.now() - t0;
 
     // ── Assertion 1: waitForLsp completed and returned a structured result ──
@@ -850,12 +851,10 @@ test('LSP: C/C++ (ms-vscode.cpptools) responds with symbols', async (ctx) => {
  * "LSP doesn't use diagnostics events."
  */
 test('LSP: PHP responds with symbols', async (ctx) => {
-    // Event-driven via testLspDetection (same pattern as Java, C++, Rust).
-    // PHP's built-in IntelliSense engine fires onDidChangeDiagnostics twice:
-    //   event #1 at ~268ms — syntax check (no symbols)
-    //   event #2 at ~1752ms — IntelliSense ready (symbols present)
-    // By waiting for 2 events, we skip the noise and fetch exactly when ready.
-    await testLspDetection(ctx, 'php', '.php', '<?php function greet($name) { return "hello $name"; }\n', 'php', 5000, 2);
+    // PHP's built-in IntelliSense engine is generally fast (~1752ms) once the
+    // file is opened. waitForLsp polls executeDocumentSymbolProvider every
+    // 200ms, so it will catch symbols as soon as the engine is ready.
+    await testLspDetection(ctx, 'php', '.php', '<?php function greet($name) { return "hello $name"; }\n', 'php', 5000);
 });
 
 test('LSP: Ruby (Ruby LSP) responds with symbols', async (ctx) => {
@@ -954,13 +953,12 @@ test('LSP: Ruby (Ruby LSP) responds with symbols', async (ctx) => {
         // Open the file so didOpen is sent to the (now-running) client.
         await openDocument(greetUri);
 
-        // Hybrid wait: event-driven (onDidChangeDiagnostics) with a polling
-        // fallback. Ruby LSP *should* publish diagnostics for the file once
-        // it's indexed, but if it doesn't, we still poll for symbols because
-        // `executeDocumentSymbolProvider` works against whatever the client
-        // has indexed, even if no diagnostics were published.
+        // Poll for symbols. waitForLsp calls executeDocumentSymbolProvider
+        // every 200ms until symbols appear or the timeout expires. The 15s
+        // timeout is a safety net — Ruby LSP usually has symbols within 1-2s
+        // of emitting "Determined that document should be indexed".
     const t0 = Date.now();
-    const result = await waitForLsp(greetUri, 10_000, 1);
+    const result = await waitForLsp(greetUri, 15_000);
     const elapsed = Date.now() - t0;
 
     ctx.ok(typeof result.ok === 'boolean', 'ruby: waitForLsp completed', result.ok);
