@@ -95,8 +95,9 @@ async function waitForLsp(
     return { ok: false, error: firstError, pollCount };
 }
 
-/** Remove a temp file. */
+/** Remove a temp file, first closing any editor tab showing it. */
 async function removeFile(uri: vscode.Uri): Promise<void> {
+    await closeTabForUri(uri);
     try {
         await vscode.workspace.fs.delete(uri);
     } catch {
@@ -104,12 +105,34 @@ async function removeFile(uri: vscode.Uri): Promise<void> {
     }
 }
 
-/** Remove a temp directory recursively. */
+/** Remove a temp directory recursively, first closing any tabs inside it. */
 async function removeDir(uri: vscode.Uri): Promise<void> {
+    // Close any open tabs whose URI is inside this directory
+    const dirStr = uri.toString();
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString().startsWith(dirStr)) {
+                await vscode.window.tabGroups.close(tab);
+            }
+        }
+    }
     try {
         await vscode.workspace.fs.delete(uri, { recursive: true });
     } catch {
         // best-effort cleanup
+    }
+}
+
+/** Close the editor tab for a specific URI if it's open. */
+async function closeTabForUri(uri: vscode.Uri): Promise<void> {
+    const uriStr = uri.toString();
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriStr) {
+                await vscode.window.tabGroups.close(tab);
+                return;
+            }
+        }
     }
 }
 
