@@ -32,6 +32,9 @@ import { INextEditCache, NextEditCache } from './completions/nes/nextEditCache';
 import { IStatusBarPanel, StatusBarPanel } from './ui/statusBarPanel';
 import { ContextBuilderService } from './completions/context/contextBuilderService';
 
+// Diagnostics (self-test command, bundled but only executed on demand)
+import { runAllDiagnostics } from './diagnostics/runner';
+
 export function activate(context: vscode.ExtensionContext) {
     const logService = new LogService();
     logService.clear();
@@ -107,7 +110,6 @@ export function activate(context: vscode.ExtensionContext) {
             const channel = vscode.window.createOutputChannel('CC Completion Diagnostics');
             channel.show(true);
             try {
-                const { runAllDiagnostics } = await import('./diagnostics/runner.js');
                 const result = await runAllDiagnostics(channel);
                 if (result.failed > 0) {
                     vscode.window.showWarningMessage(

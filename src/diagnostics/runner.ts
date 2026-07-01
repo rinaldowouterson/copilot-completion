@@ -20,6 +20,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ContextBuilderService } from '../completions/context/contextBuilderService';
 import { LogService } from '../completions/shared/log/logService';
+import { LANG_TO_LSP_EXTENSIONS, extensionUriFor } from '../completions/context/lspSupport';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -315,11 +316,6 @@ test('languageSyntax matches TypeScript rules', async () => {
 });
 
 test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async () => {
-    // Dynamic import to avoid bundling LSP support code at startup
-    const { LANG_TO_LSP_EXTENSIONS, extensionUriFor } = await import(
-        '../completions/context/lspSupport.js'
-    );
-
     for (const [lang, exts] of Object.entries(LANG_TO_LSP_EXTENSIONS)) {
         assert.ok(Array.isArray(exts), `${lang} extensions must be an array`);
         for (const ext of exts) {
