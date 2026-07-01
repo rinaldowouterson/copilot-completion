@@ -1,4 +1,5 @@
 import { PromptTags } from '../tags';
+import { stripOutputMarkers } from '../../../common/stripOutputMarkers';
 
 export interface IResponseStage {
     readonly name: string;
@@ -68,6 +69,11 @@ export class ResponsePipeline {
         for (const stage of this._stages) {
             lines = stage.process(lines, context);
         }
+        // Strip any leaked prompt markers (GHOST tags, boundary markers,
+        // NES tags) from the joined output, then re-split.
+        const joined = stripOutputMarkers(lines.join('\n'));
+        lines = joined ? joined.split('\n') : [];
+
         // Trim trailing blank lines
         while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
             lines.pop();

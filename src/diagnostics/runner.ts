@@ -41,6 +41,7 @@ import { VSCodeGhostConfigProvider } from '../config/ghostConfig';
 import { VSCodeNesConfigProvider } from '../config/nesConfig';
 import { ISecretConfig } from '../config/secretConfig';
 import { InlineSuggestionResolver } from '../completions/nes/core/inlineSuggestionResolver';
+import { stripOutputMarkers, diagnoseMarkerLeakage, containsAnyMarker } from '../common/stripOutputMarkers';
 
 // ──────────────────────────────────────────────────────────────
 //  Helpers
@@ -1720,6 +1721,74 @@ test('Ghost: multiline — heuristicIsEmptyBlock additional edge cases', async (
     ctx.equal(heuristicIsEmptyBlock('{\n\n}', 1), true, 'empty line between braces');
     ctx.equal(heuristicIsEmptyBlock('  {\n  \n  }', 3), true, 'indented braces');
     ctx.equal(heuristicIsEmptyBlock('{ \n }', 1), true, 'space after brace');
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Output marker stripping  (stripOutputMarkers)
+// ──────────────────────────────────────────────────────────────
+
+test('stripOutputMarkers: removes GHOST FIM tags from start', async (ctx) => {
+    ctx.equal(stripOutputMarkers('<|fim_prefix|>actual code'), 'actual code', '<|fim_prefix|>');
+    ctx.equal(stripOutputMarkers('<|fim_suffix|>actual code'), 'actual code', '<|fim_suffix|>');
+    ctx.equal(stripOutputMarkers('<|fim_middle|>actual code'), 'actual code', '<|fim_middle|>');
+    ctx.equal(stripOutputMarkers('<|fim_prefix|><|fim_suffix|>actual code'), 'actual code', 'chained FIM tags');
+});
+
+test('stripOutputMarkers: removes NES tags from start and end', async (ctx) => {
+    ctx.equal(stripOutputMarkers('<|code_to_edit|>actual code'), 'actual code', '<|code_to_edit|> at start');
+    ctx.equal(stripOutputMarkers('actual code<|/code_to_edit|>'), 'actual code', '<|/code_to_edit|> at end');
+    ctx.equal(stripOutputMarkers('<|imports|>\n./foo.ts: Foo\n<|/imports|>\nactual code'), 'actual code', '<|imports|> block at start');
+    ctx.equal(stripOutputMarkers('actual code\n<|imports|>\n./bar.ts: Bar\n<|/imports|>'), 'actual code', '<|imports|> block at end');
+});
+
+test('stripOutputMarkers: removes NES boundary markers from start/end', async (ctx) => {
+    ctx.equal(stripOutputMarkers('###remain edit start boundary line###\nedited code'), 'edited code', 'start marker at beginning');
+    ctx.equal(stripOutputMarkers('edited code\n###remain edit end boundary line###'), 'edited code', 'end marker at end');
+    ctx.equal(stripOutputMarkers('###remain edit start boundary line###\nedited\n###remain edit end boundary line###'), 'edited', 'both markers wrapping');
+});
+
+test('stripOutputMarkers: removes ad-hoc NES tags (angle-bracket format)', async (ctx) => {
+    ctx.equal(stripOutputMarkers('<imports>\nsomething\n</imports>\nreal code'), 'real code', '<imports> at start');
+    ctx.equal(stripOutputMarkers('real code\n<super_types>\nBase\n</super_types>'), 'real code', '<super_types> at end');
+    ctx.equal(stripOutputMarkers('<missing_imports>\nFoo\n</missing_imports>\n'), '', 'standalone tag block fully stripped');
+});
+
+test('stripOutputMarkers: handles chained and repeated markers', async (ctx) => {
+    ctx.equal(stripOutputMarkers('<|cursor|><|cursor|><|cursor|>code'), 'code', 'repeated cursor tags');
+    ctx.equal(stripOutputMarkers('<|fim_prefix|><|imports|>code<|/imports|>'), 'code', 'chained prefix+imports');
+    ctx.equal(stripOutputMarkers('code\n<|cursor|>\n<|/code_to_edit|>'), 'code', 'multiple trailing tags');
+});
+
+test('stripOutputMarkers: idempotent', async (ctx) => {
+    const input = '<|fim_prefix|>hello world<|cursor|>';
+    const once = stripOutputMarkers(input);
+    const twice = stripOutputMarkers(once);
+    ctx.equal(once, twice, 'second pass no-op');
+});
+
+test('stripOutputMarkers: leaves normal code unchanged', async (ctx) => {
+    ctx.equal(stripOutputMarkers('const x = 1;'), 'const x = 1;', 'plain code');
+    ctx.equal(stripOutputMarkers('function foo() { return 1; }'), 'function foo() { return 1; }', 'function');
+    ctx.equal(stripOutputMarkers('<|valid| in code'), '<|valid| in code', 'partial tag in code (no close)');
+});
+
+test('stripOutputMarkers: trims trailing blank lines after stripping', async (ctx) => {
+    const result = stripOutputMarkers('code\n\n\n');
+    ctx.equal(result, 'code', 'trailing blanks removed');
+});
+
+test('containsAnyMarker: detects markers anywhere in text', async (ctx) => {
+    ctx.ok(containsAnyMarker('<|fim_prefix|>'), 'detects fim_prefix');
+    ctx.ok(containsAnyMarker('###remain edit start boundary line###'), 'detects boundary markers');
+    ctx.ok(!containsAnyMarker('clean code'), 'no false positive on clean code');
+    ctx.ok(!containsAnyMarker('<|something_unknown|>'), 'unknown pipe tag not detected');
+});
+
+test('diagnoseMarkerLeakage: lists all leaked markers', async (ctx) => {
+    const leaked = diagnoseMarkerLeakage('<|fim_prefix|>code<|cursor|><|/code_to_edit|>');
+    ctx.ok(leaked.length >= 2, 'at least 2 markers detected');
+    ctx.ok(leaked.includes('<|fim_prefix|>'), 'fim_prefix in leaks');
+    ctx.ok(leaked.includes('<|cursor|>'), 'cursor in leaks');
 });
 
 // ──────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import { MultilineContextBuilder } from './multiline/MultilineContextBuilder';
 import { IContextBuilderService } from '../context/contextBuilderService';
 import { notifyCancelled, waitForDebounce, getLastCancelledTime } from '../../common/requestDebounce';
 import { containsChatMarkup } from '../../common/chatMarkup';
+import { stripOutputMarkers } from '../../common/stripOutputMarkers';
 
 export interface GhostTextResult {
     completions: GhostCompletion[];
@@ -125,10 +126,9 @@ export class GhostTextComputer {
                 document,
                 position,
             );
-            // Reject if the cached result contains chat editing markup
+            // Log if cached result still contains markup after strip
             if (containsChatMarkup(cacheResult.text)) {
-                this._log.info(`[GHOST] SKIP — cached result contains chat editing markup`);
-                return undefined;
+                this._log.warn(`[GHOST] WARN — cached result still contains markup after strip`);
             }
 
             this._log.info(`[GHOST] CACHE_HIT count=${cached.length} result="${this._trunc(cacheResult.text, 60)}" [${Date.now() - t2}ms] total=${Date.now() - t0}ms`);
@@ -343,10 +343,11 @@ export class GhostTextComputer {
             this._log.info(`[GHOST] RESULT resultType=Network final=${processed.text.length}ch total=${Date.now() - t0}ms`);
             this._log.debug(`\n`+ processed.text);
 
-            // Step 13.5: Reject if the model reproduced chat editing markup
+            // Step 13.5: Log if markers still present (stripper already handled
+            // start/end leakage — any remaining marker is likely legitimate code).
             if (containsChatMarkup(processed.text)) {
-                this._log.info(`[GHOST] SKIP — result contains chat editing markup`);
-                return undefined;
+                this._log.warn(`[GHOST] WARN — result still contains chat editing markup after strip`);
+                this._log.debug(`[GHOST] WARN — markup: ${processed.text}`);
             }
 
             // Step 14: Cache & return
@@ -428,6 +429,13 @@ export class GhostTextComputer {
         position: vscode.Position,
     ): CompletionChoice {
         let text = choice.text;
+
+        // Strip any leaked prompt markers from start/end (GHOST tags,
+        // NES boundary markers, import tags, etc.).  The model should
+        // never reproduce these, but when it does we clean rather than
+        // discard the whole completion.
+        text = stripOutputMarkers(text);
+
         const currentLine = document.lineAt(position.line);
         const baseIndent = currentLine.text.substring(0, currentLine.firstNonWhitespaceCharacterIndex);
 
