@@ -76,22 +76,67 @@ async function waitForLsp(
     const deadline = Date.now() + timeoutMs;
     let pollCount = 0;
     let firstError: string | undefined;
-    while (Date.now() < deadline) {
+    const uriStr = uri.toString();
+
+    const tryFetch = async (): Promise<vscode.DocumentSymbol[] | undefined> => {
         try {
-            const symbols = await vscode.commands.executeCommand<
-                vscode.DocumentSymbol[] | undefined
-            >('vscode.executeDocumentSymbolProvider', uri);
-            if (symbols && symbols.length > 0) {
-                return { ok: true, symbols, pollCount };
-            }
+            const s = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
+                'vscode.executeDocumentSymbolProvider', uri,
+            );
+            if (s && s.length > 0) return s;
         } catch (err) {
-            if (!firstError) {
-                firstError = err instanceof Error ? err.message : String(err);
-            }
+            if (!firstError) firstError = err instanceof Error ? err.message : String(err);
         }
-        pollCount++;
-        await new Promise(r => setTimeout(r, 300));
+        return undefined;
+    };
+
+    // Listen for diagnostics on our file — TS server fires this when it
+    // finishes processing, meaning symbols should be available right after.
+    let diagnosticsFired = false;
+    const d = vscode.languages.onDidChangeDiagnostics(e => {
+        if (e.uris.some(u => u.toString() === uriStr)) {
+            diagnosticsFired = true;
+        }
+    });
+
+    try {
+        // ── Phase 1: Fast poll (50ms × 10 = 500ms) ──
+        // Catches TypeScript loose files, Python, Go, Rust — usually <300ms.
+        while (Date.now() < deadline && pollCount < 10) {
+            const s = await tryFetch();
+            if (s) return { ok: true, symbols: s, pollCount };
+            pollCount++;
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        // ── Phase 2: Diagnostics-triggered + slow poll ──
+        // For workspace projects the TS server processes asynchronously.
+        // When diagnostics fire, we know processing is done — do a burst check.
+        while (Date.now() < deadline) {
+            const s = await tryFetch();
+            if (s) return { ok: true, symbols: s, pollCount };
+            pollCount++;
+
+            if (diagnosticsFired) {
+                // Diagnostics arrived — TS server finished. Burst-check then exit.
+                for (let i = 0; i < 3; i++) {
+                    await new Promise(r => setTimeout(r, 10));
+                    const burst = await tryFetch();
+                    if (burst) return { ok: true, symbols: burst, pollCount };
+                }
+                break;
+            }
+
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        // ── Phase 3: One final attempt ──
+        const s = await tryFetch();
+        if (s) return { ok: true, symbols: s, pollCount };
+    } finally {
+        d.dispose();
     }
+
     return { ok: false, error: firstError, pollCount };
 }
 
