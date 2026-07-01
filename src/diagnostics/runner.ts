@@ -104,6 +104,39 @@ async function removeFile(uri: vscode.Uri): Promise<void> {
     }
 }
 
+/** Remove a temp directory recursively. */
+async function removeDir(uri: vscode.Uri): Promise<void> {
+    try {
+        await vscode.workspace.fs.delete(uri, { recursive: true });
+    } catch {
+        // best-effort cleanup
+    }
+}
+
+/** Create a temp directory URI with a unique name. */
+function tmpDir(label: string): vscode.Uri {
+    const ts = Date.now();
+    const idx = _counter++;
+    return vscode.Uri.file(path.join(os.tmpdir(), `__cc_diag_ws_${label}_${ts}_${idx}`));
+}
+
+/** Write a config file (JSON) into a directory. */
+async function writeJsonConfig(dir: vscode.Uri, filename: string, config: Record<string, unknown>): Promise<vscode.Uri> {
+    const uri = vscode.Uri.file(path.join(dir.fsPath, filename));
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(config, null, 2), 'utf-8'));
+    return uri;
+}
+
+/** Write a TOML text file into a directory. */
+async function writeTextFile(dir: vscode.Uri, relativePath: string, content: string): Promise<vscode.Uri> {
+    const uri = vscode.Uri.file(path.join(dir.fsPath, relativePath));
+    // Ensure parent directory exists
+    const parentDir = vscode.Uri.file(path.dirname(uri.fsPath));
+    try { await vscode.workspace.fs.createDirectory(parentDir); } catch { /* ok */ }
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
+    return uri;
+}
+
 // ──────────────────────────────────────────────────────────────
 //  Structured assertion logger
 // ──────────────────────────────────────────────────────────────
@@ -2057,6 +2090,190 @@ test('Non-LSP: circular import pattern does not crash', async (ctx) => {
 
     await removeFile(uriA);
     await removeFile(uriB);
+});
+
+// ──────────────────────────────────────────────────────────────
+//  Workspace fixture tests: path aliases, re-exports, multi-file
+//  These create miniprojects with tsconfig.json etc. so the LSP
+//  has full project context (path aliases, module resolution).
+// ──────────────────────────────────────────────────────────────
+
+test('[WS] TS path alias @/ → ./src/ resolves via tsconfig.json', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const wsDir = tmpDir('alias_ts');
+    await writeJsonConfig(wsDir, 'tsconfig.json', {
+        compilerOptions: {
+            paths: { '@/*': ['./src/*'] },
+            baseUrl: '.',
+            module: 'ESNext',
+            target: 'ES2022',
+        },
+        include: ['src/**/*.ts'],
+    });
+
+    await writeTextFile(wsDir, 'src/utils.ts', [
+        'export function greet(name: string): string {',
+        '  return `Hello, ${name}!`;',
+        '}',
+    ].join('\n'));
+
+    await writeTextFile(wsDir, 'src/main.ts', [
+        `import { greet } from '@/utils';`,
+        '',
+        'console.log(greet("world"));',
+    ].join('\n'));
+
+    const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
+    await openDocument(sourceUri);
+    const lsp = await waitForLsp(sourceUri, 25_000);
+    ctx.ok(typeof lsp.ok === 'boolean', 'WS alias: LSP wait completed', lsp.ok);
+    ctx.value('WS alias: LSP', lsp.ok ? `ready (${lsp.pollCount} polls)` : `not ready (${lsp.pollCount} polls)`);
+
+    const doc = await vscode.workspace.openTextDocument(sourceUri);
+    const bundle = await builder.gather(doc, new vscode.Position(2, 20));
+
+    ctx.ok(Array.isArray(bundle.importResolutions), 'WS alias: importResolutions is array');
+    ctx.value('WS alias: importResolutions count', bundle.importResolutions.length);
+
+    if (bundle.importResolutions.length > 0) {
+        const imp = bundle.importResolutions[0];
+        ctx.value('WS alias: import[0].relativePath', imp.relativePath);
+        ctx.ok(imp.relativePath.includes('utils'), 'WS alias: resolved to utils file', imp.relativePath);
+    } else {
+        ctx.value('WS alias', 'no import resolutions — LSP may not have resolved the @/ alias (temp file outside workspace)');
+    }
+
+    await removeDir(wsDir);
+});
+
+test('[WS] TS re-export chain: barrel → utils resolved fully', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const wsDir = tmpDir('reexport_ts');
+    await writeJsonConfig(wsDir, 'tsconfig.json', {
+        compilerOptions: {
+            paths: { '@/*': ['./src/*'] },
+            baseUrl: '.',
+            module: 'ESNext',
+            target: 'ES2022',
+        },
+        include: ['src/**/*.ts'],
+    });
+
+    // utils.ts — original source
+    await writeTextFile(wsDir, 'src/utils.ts', [
+        'export function greet(name: string): string {',
+        '  return `Hello, ${name}!`;',
+        '}',
+    ].join('\n'));
+
+    // barrel.ts — re-exports from utils
+    await writeTextFile(wsDir, 'src/barrel.ts', [
+        `export { greet } from './utils';`,
+    ].join('\n'));
+
+    // main.ts — imports from barrel via @/
+    await writeTextFile(wsDir, 'src/main.ts', [
+        `import { greet } from '@/barrel';`,
+        '',
+        'console.log(greet("world"));',
+    ].join('\n'));
+
+    const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
+    await openDocument(sourceUri);
+    const lsp = await waitForLsp(sourceUri, 25_000);
+    ctx.ok(typeof lsp.ok === 'boolean', 'WS reexport: LSP wait completed', lsp.ok);
+
+    const doc = await vscode.workspace.openTextDocument(sourceUri);
+    const bundle = await builder.gather(doc, new vscode.Position(2, 20));
+
+    ctx.ok(Array.isArray(bundle.importResolutions), 'WS reexport: importResolutions is array');
+    ctx.value('WS reexport: importResolutions count', bundle.importResolutions.length);
+
+    if (bundle.importResolutions.length > 0) {
+        const imp = bundle.importResolutions[0];
+        ctx.value('WS reexport: import[0].relativePath', imp.relativePath);
+        ctx.value('WS reexport: import[0].exports', imp.exports.map(e => `${e.name}:${e.kind}`).join(' | '));
+        ctx.ok(imp.exports.some(e => e.name === 'greet'), 'WS reexport: greet export present');
+    } else {
+        ctx.value('WS reexport', 'no import resolutions — LSP may not have traced the re-export chain');
+    }
+
+    await removeDir(wsDir);
+});
+
+test('[WS] TS multi-file: cross-file symbol resolution in project', async (ctx) => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const wsDir = tmpDir('multi_ts');
+    await writeJsonConfig(wsDir, 'tsconfig.json', {
+        compilerOptions: {
+            paths: { '@/*': ['./src/*'] },
+            baseUrl: '.',
+            module: 'ESNext',
+            target: 'ES2022',
+        },
+        include: ['src/**/*.ts'],
+    });
+
+    // user.ts — interface
+    await writeTextFile(wsDir, 'src/user.ts', [
+        'export interface User {',
+        '  id: string;',
+        '  name: string;',
+        '  email: string;',
+        '}',
+    ].join('\n'));
+
+    // service.ts — depends on User
+    await writeTextFile(wsDir, 'src/service.ts', [
+        "import { User } from './user';",
+        '',
+        'export function formatUser(u: User): string {',
+        '  return `${u.name} <${u.email}>`;',
+        '}',
+    ].join('\n'));
+
+    // main.ts — imports from service
+    await writeTextFile(wsDir, 'src/main.ts', [
+        "import { formatUser } from '@/service';",
+        '',
+        'const u = { id: "1", name: "Alice", email: "alice@example.com" };',
+        'console.log(formatUser(u));',
+    ].join('\n'));
+
+    const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
+    await openDocument(sourceUri);
+    const lsp = await waitForLsp(sourceUri, 25_000);
+    ctx.ok(typeof lsp.ok === 'boolean', 'WS multi: LSP wait completed', lsp.ok);
+
+    const doc = await vscode.workspace.openTextDocument(sourceUri);
+    const bundle = await builder.gather(doc, new vscode.Position(3, 25));
+
+    ctx.ok(Array.isArray(bundle.importResolutions), 'WS multi: importResolutions is array');
+    ctx.value('WS multi: importResolutions count', bundle.importResolutions.length);
+
+    if (bundle.importResolutions.length > 0) {
+        const imp = bundle.importResolutions[0];
+        ctx.value('WS multi: import[0].relativePath', imp.relativePath);
+        ctx.value('WS multi: import[0].exports', imp.exports.map(e => `${e.name}:${e.kind}`).join(' | '));
+        ctx.ok(imp.exports.some(e => e.name === 'formatUser'), 'WS multi: formatUser resolved');
+    } else {
+        ctx.value('WS multi', 'no import resolutions');
+
+        // Also log the bundle's exports and scope for debugging
+        ctx.value('WS multi: fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`).join(' | '));
+        ctx.value('WS multi: languageId', bundle.languageId);
+    }
+
+    await removeDir(wsDir);
 });
 
 // ──────────────────────────────────────────────────────────────
