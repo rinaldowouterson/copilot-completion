@@ -3074,6 +3074,9 @@ export async function runAllDiagnostics(
         channel.appendLine(`[preflight] closed ${leakedUntitled} leaked untitled tab(s) from previous run`);
     }
 
+    channel.appendLine(`[config] fail-fast: enabled — runner stops on first failure`);
+    channel.appendLine('');
+
     for (const t of tests) {
         const ctx = new AssertLogger(channel);
         // Separator line for readability between tests
@@ -3088,6 +3091,9 @@ export async function runAllDiagnostics(
             const msg = err instanceof Error ? err.message : String(err);
             channel.appendLine(`✗ FAIL`);
             channel.appendLine(`    ${msg}`);
+            channel.appendLine('');
+            channel.appendLine('── FAIL-FAST: first failure — stopping runner ──');
+            break;
         }
     }
 
@@ -3101,12 +3107,18 @@ export async function runAllDiagnostics(
     }
 
     const elapsed = Date.now() - start;
+    const ran = passed + failed;
+    const skipped = tests.length - ran;
     channel.appendLine('');
     channel.appendLine(`── ${elapsed}ms ──`);
     if (failed === 0) {
         channel.appendLine(`  All ${passed} diagnostics passed.`);
+        if (skipped > 0) {
+            channel.appendLine(`  (${skipped} test(s) skipped — fail-fast not triggered)`);
+        }
     } else {
-        channel.appendLine(`  ${passed} passed, ${failed} failed (${tests.length} total)`);
+        channel.appendLine(`  ${passed} passed, ${failed} failed, ${skipped} skipped (${tests.length} total, fail-fast)`);
+        channel.appendLine(`  First failure: "${tests[passed]?.name ?? 'unknown'}"`);
     }
     channel.appendLine('');
 
