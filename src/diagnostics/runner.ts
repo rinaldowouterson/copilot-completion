@@ -18,7 +18,7 @@ import * as assert from 'assert';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ContextBuilderService, normalizePath } from '../completions/context/contextBuilderService';
+import { ContextBuilderService, normalizePath, extractRelativeImportSpecifiers } from '../completions/context/contextBuilderService';
 import { LogService } from '../completions/shared/log/logService';
 import { LANG_TO_LSP_EXTENSIONS, extensionUriFor, hasLspSupport } from '../completions/context/lspSupport';
 import { cleanHoverSignature } from '../completions/context/hoverEnrichment';
@@ -1033,7 +1033,6 @@ test('Non-LSP: regex fallback handles multiple languages', async (ctx) => {
     // extractRelativeImportSpecifiers is the regex fallback used when
     // the LSP link provider returns nothing. It must handle all target
     // languages without throwing.
-    const { extractRelativeImportSpecifiers } = await import('../completions/context/contextBuilderService.js');
 
     const ts_imports = 'import { a } from "./foo"; import { b } from "../bar";\n';
     ctx.equal(extractRelativeImportSpecifiers(ts_imports, 'typescript').length, 2,
