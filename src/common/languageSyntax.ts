@@ -183,10 +183,16 @@ export function findStatementEndHeuristic(
         if (text === undefined) continue;
         const trimmed = text.trim();
 
-        // Track bracket depth
+        // Track bracket depth and count closing brackets on this line.
+        // A line that closes a bracket is always part of the statement,
+        // even after the bracket depth reaches 0.
+        let bracketsClosedThisLine = 0;
         for (const ch of text) {
             if (ch === '(' || ch === '[' || ch === '{') bracketDepth++;
-            if (ch === ')' || ch === ']' || ch === '}') bracketDepth--;
+            if (ch === ')' || ch === ']' || ch === '}') {
+                bracketDepth--;
+                bracketsClosedThisLine++;
+            }
         }
         bracketDepth = Math.max(0, bracketDepth);
 
@@ -202,8 +208,12 @@ export function findStatementEndHeuristic(
         // which by definition is past the cursor line.
         if (line === startLine) continue;
 
-        // Rule 2: bracket depth > 0 → statement continues
+        // Rule 2a: bracket depth > 0 → statement continues
         if (bracketDepth > 0) continue;
+
+        // Rule 2b: brackets closed on this line → the closing bracket line
+        // is part of the statement, even though depth is now 0.
+        if (bracketsClosedThisLine > 0) continue;
 
         // Rule 3: continuation operator at end of line → statement continues
         if (endsWithContinuation(text, syntax)) continue;
@@ -220,8 +230,14 @@ export function findStatementEndHeuristic(
             if (nextLine.startsWith('.') || nextLine.startsWith('?.') || nextLine.startsWith('[')) continue;
         }
 
-        // All rules passed — this line terminates the statement
-        return line;
+        // Rule 6: this line starts with a dot-chaining prefix → continuation
+        // of the previous line (e.g. `obj\n  .method()`).
+        const startChars = trimmed;
+        if (startChars.startsWith('.') || startChars.startsWith('?.')) continue;
+
+        // All rules passed — this line is NOT part of the same statement.
+        // The statement terminated on the PREVIOUS line.
+        return line - 1;
     }
 
     // Budget cap reached, return the last line scanned
