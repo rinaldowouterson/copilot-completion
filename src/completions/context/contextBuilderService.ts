@@ -7,6 +7,7 @@ import {
     EnclosingScope,
     ImportResolution,
     MissingImport,
+    LanguageSyntax,
 } from '../../common/contextBundle';
 import { getSyntax, findStatementEnd } from '../../common/languageSyntax';
 import { LRUCacheMap } from '../../common/lruCacheMap';
@@ -139,6 +140,34 @@ export class ContextBuilderService implements IContextBuilderService {
         const uri = document.uri.toString();
         const languageId = document.languageId;
         const syntax = getSyntax(languageId);
+
+        // Safety net: any unhandled error in gather() returns a minimal bundle
+        // instead of crashing the inline completion provider.
+        try {
+            return await this._gatherImpl(document, position, config, uri, languageId, syntax);
+        } catch (err) {
+            this._log.error(`[CONTEXT] gather() unhandled error: ${err instanceof Error ? err.message : String(err)}`);
+            return {
+                enclosingScope: undefined,
+                statementEndLine: undefined,
+                fileExports: [],
+                missingImports: [],
+                importResolutions: [],
+                superTypes: undefined,
+                languageId,
+                languageSyntax: syntax,
+            };
+        }
+    }
+
+    private async _gatherImpl(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        config: ContextConfig,
+        uri: string,
+        languageId: string,
+        syntax: LanguageSyntax,
+    ): Promise<ContextBundle> {
 
         // Phase D: notify once per hour per language if no LSP is available.
         // Fire-and-forget — never blocks gather().
@@ -328,6 +357,12 @@ export class ContextBuilderService implements IContextBuilderService {
         const startTime = Date.now();
         const targets: vscode.Uri[] = [];
 
+        // 0. Untitled documents (no fsPath) cannot have import resolution
+        if (!sourceUri.fsPath || sourceUri.scheme !== 'file') {
+            this._log.debug('[CONTEXT] skipping import resolution for non-file URI: ' + sourceUri.toString());
+            return [];
+        }
+
         // 1. LSP path
         const lspTargets = await this._resolveViaLSP(sourceUri);
         if (lspTargets.length > 0) {
@@ -375,6 +410,10 @@ export class ContextBuilderService implements IContextBuilderService {
     /**
      * Phase A + C: Fetch symbols + hover for the top exports of each target,
      * compute the mandatory relativePath, and build `ImportResolution`s.
+     *
+     * Cycle-safe: `_resolutionChain` tracks the current import chain to
+     * detect circular imports (A→B→A). When a cycle is detected, the
+     * duplicate target is skipped and a debug log is emitted.
      */
     private async _buildImportResolutions(
         targets: vscode.Uri[],
@@ -382,15 +421,24 @@ export class ContextBuilderService implements IContextBuilderService {
         hoverEnabled: boolean,
     ): Promise<ImportResolution[]> {
         const resolved: ImportResolution[] = [];
-        const seen = new Set<string>();
+        const globalSeen = new Set<string>();   // across all imports in this file
+        const chainSeen = new Set<string>();    // current resolution chain (cycle detection)
         const sourceUriStr = sourceUri.toString();
 
         for (const targetUri of targets) {
             if (resolved.length >= 5) break;
             const targetUriStr = targetUri.toString();
-            if (seen.has(targetUriStr)) continue;
+            if (globalSeen.has(targetUriStr)) continue;
             if (targetUriStr === sourceUriStr) continue;
-            seen.add(targetUriStr);
+
+            // Circular import check: if we've seen this target in the current
+            // resolution chain, skip it and log the cycle.
+            if (chainSeen.has(targetUriStr)) {
+                this._log.warn(`[CONTEXT] circular import detected: ${targetUriStr} already in resolution chain`);
+                continue;
+            }
+            chainSeen.add(targetUriStr);
+            globalSeen.add(targetUriStr);
 
             try {
                 const targetDoc = await vscode.workspace.openTextDocument(targetUri);

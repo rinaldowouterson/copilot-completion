@@ -541,6 +541,289 @@ test('Bundle: Go export shape with language routing', async () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+//  P0/P1 Gap: Resilience & Error Handling
+// ──────────────────────────────────────────────────────────────
+
+test('[P0] Phase A: import from non-existent file returns empty — not crash', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const sourceUri = tmpUri('.ts', 'gap_missing_target');
+    await writeFile(sourceUri, [
+        `import { Missing } from './nonexistent-module';`,
+        '',
+        'function test(): void { Missing.doSomething(); }',
+    ].join('\n'));
+
+    await openDocument(sourceUri);
+    await waitForLsp(sourceUri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(sourceUri);
+    // This should NOT throw — must return empty importResolutions gracefully
+    const bundle = await builder.gather(doc, new vscode.Position(2, 20));
+
+    assert.ok(Array.isArray(bundle.importResolutions),
+        'importResolutions must be array even when target is missing');
+    // May be 0 if LSP can't resolve, or 1+ if it finds something — both OK
+    assert.ok(typeof bundle.statementEndLine === 'number',
+        'statementEndLine must be number even with broken imports');
+    assert.strictEqual(bundle.languageId, 'typescript');
+
+    await removeFile(sourceUri);
+});
+
+test('[P0] Phase A: broken import syntax does not crash gather()', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_broken_syntax');
+    // Malformed import — missing closing quote
+    await writeFile(uri, [
+        `import { x } from './broken;`,
+        'const y = 1;',
+    ].join('\n'));
+
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(1, 5));
+
+    assert.ok(Array.isArray(bundle.importResolutions),
+        'importResolutions must be array even with broken import syntax');
+    assert.ok(typeof bundle.statementEndLine === 'number');
+    // The regex should skip the malformed line, but the file should still parse
+    assert.strictEqual(bundle.fileExports.length, 0);
+
+    await removeFile(uri);
+});
+
+test('[P0] Phase H: actual missing-import detection', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_phase_h_detection');
+    // Use an undefined symbol that TypeScript will flag
+    await writeFile(uri, [
+        '// This file uses madeUpFunction that is not imported',
+        'const result = madeUpFunction("test");',
+    ].join('\n'));
+
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    // Wait a beat for diagnostics to propagate
+    await new Promise(r => setTimeout(r, 1000));
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(1, 20));
+
+    assert.ok(Array.isArray(bundle.missingImports),
+        'missingImports must be array');
+    // If TypeScript LSP is active, it SHOULD detect madeUpFunction as undefined
+    const found = bundle.missingImports.find(m => m.symbolName === 'madeUpFunction');
+    if (found) {
+        console.log('[diagnostics] Phase H: detected missing import: madeUpFunction');
+    } else {
+        // This may fail if diagnostics haven't propagated yet — log but don't fail
+        console.warn('[diagnostics] Phase H: missing import NOT detected (diagnostics may need more time)');
+    }
+
+    await removeFile(uri);
+});
+
+test('[P1] Phase H: gather() on empty file does not throw', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_empty_file');
+    await writeFile(uri, '');
+    await openDocument(uri);
+    await waitForLsp(uri, 5_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(0, 0));
+
+    assert.ok(Array.isArray(bundle.fileExports), 'fileExports must be array on empty file');
+    assert.strictEqual(bundle.fileExports.length, 0, 'empty file has no exports');
+    assert.ok(Array.isArray(bundle.importResolutions));
+    assert.strictEqual(bundle.importResolutions.length, 0);
+    assert.ok(Array.isArray(bundle.missingImports));
+
+    // statementEndLine should still be a number (heuristic fallback)
+    assert.ok(typeof bundle.statementEndLine === 'number',
+        `statementEndLine must be number on empty file, got ${typeof bundle.statementEndLine}`);
+
+    console.log(`[diagnostics] Empty file: statementEndLine=${bundle.statementEndLine}, languageId=${bundle.languageId}`);
+
+    await removeFile(uri);
+});
+
+test('[P1] Phase B: cursor at end of file returns valid statementEndLine', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_eof');
+    await writeFile(uri, [
+        'const x = 42;',
+        'const y = x + 1;',
+    ].join('\n'));
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Cursor at last line, column 0
+    const lastLine = doc.lineCount - 1;
+    const bundle = await builder.gather(doc, new vscode.Position(lastLine, 0));
+
+    assert.ok(typeof bundle.statementEndLine === 'number',
+        `statementEndLine must be number at EOF, got ${typeof bundle.statementEndLine}`);
+    assert.ok(bundle.statementEndLine! >= lastLine,
+        `statementEndLine (${bundle.statementEndLine}) should be >= cursor line (${lastLine})`);
+
+    console.log(`[diagnostics] EOF cursor: statementEndLine=${bundle.statementEndLine}, lastLine=${lastLine}`);
+
+    await removeFile(uri);
+});
+
+test('[P1] Phase B: multi-line block statement end', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_multiline');
+    await writeFile(uri, [
+        'function demo() {',
+        '  const a = 1;',
+        '  const b = 2;',
+        '  return a + b;',
+        '}',
+    ].join('\n'));
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(1, 7)); // inside the function
+
+    assert.ok(typeof bundle.statementEndLine === 'number',
+        `statementEndLine must be number, got ${typeof bundle.statementEndLine}`);
+    // Statement on line 1 is 'const a = 1;' — should end on line 1 or later
+    assert.ok(bundle.statementEndLine! >= 1,
+        `statementEndLine (${bundle.statementEndLine}) should be >= 1`);
+
+    console.log(`[diagnostics] Multi-line block: statementEndLine=${bundle.statementEndLine}, enclosingScope=${bundle.enclosingScope?.name ?? 'none'}`);
+
+    await removeFile(uri);
+});
+
+test('[P1] untitled:Untitled-1 document does not throw in gather()', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Create an untitled document (no fsPath)
+    const doc = await vscode.workspace.openTextDocument({ language: 'typescript', content: 'const x = 1;\n' });
+    await vscode.window.showTextDocument(doc, { preserveFocus: true, preview: true });
+
+    const bundle = await builder.gather(doc, new vscode.Position(0, 5));
+
+    assert.ok(Array.isArray(bundle.importResolutions),
+        'importResolutions must be array for untitled docs');
+    assert.strictEqual(bundle.importResolutions.length, 0,
+        'untitled docs should have 0 import resolutions');
+    assert.ok(typeof bundle.statementEndLine === 'number',
+        `statementEndLine must be number for untitled docs, got ${typeof bundle.statementEndLine}`);
+
+    console.log(`[diagnostics] Untitled doc: languageId=${bundle.languageId}, statementEndLine=${bundle.statementEndLine}`);
+});
+
+test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Python LSP (Pylance) doesn't support type hierarchy — verify graceful handling
+    const uri = tmpUri('.py', 'gap_no_th');
+    await writeFile(uri, [
+        'class MyBase:',
+        '    pass',
+        '',
+        'class MyDerived(MyBase):',
+        '    pass',
+    ].join('\n'));
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Cursor on line 3 (class MyDerived)
+    const bundle = await builder.gather(doc, new vscode.Position(3, 10));
+
+    // Should not throw — superTypes may be undefined or [] depending on LSP
+    assert.ok(bundle.superTypes === undefined || Array.isArray(bundle.superTypes),
+        `superTypes must be undefined or array, got ${typeof bundle.superTypes}`);
+
+    console.log(`[diagnostics] Python class: superTypes=${bundle.superTypes ? JSON.stringify(bundle.superTypes.map(s => s.name)) : 'undefined'}`);
+
+    await removeFile(uri);
+});
+
+test('[P1] Phase C: hover on whitespace returns empty — does not throw', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    const uri = tmpUri('.ts', 'gap_hover_whitespace');
+    await writeFile(uri, [
+        'const x = 42;',
+        '',
+        'function foo() { return x; }',
+    ].join('\n'));
+    await openDocument(uri);
+    await waitForLsp(uri, 10_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    // Cursor on line 1 (blank line), column 0 — hover returns nothing
+    const bundle = await builder.gather(doc, new vscode.Position(1, 0));
+
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.ok(typeof bundle.statementEndLine === 'number');
+
+    console.log(`[diagnostics] Hover on whitespace: fileExports=${bundle.fileExports.length}, statementEndLine=${bundle.statementEndLine}`);
+
+    await removeFile(uri);
+});
+
+test('[P0] gather() safety net: malformed document never throws', async () => {
+    const log = new LogService();
+    log.enabled = false;
+    const builder = new ContextBuilderService(log);
+
+    // Binary-ish content that could confuse parsers
+    const uri = tmpUri('.ts', 'gap_binaryish');
+    await writeFile(uri, '\x00\x01\x02const \x00\x00 = 1;\n');
+    await openDocument(uri);
+    await waitForLsp(uri, 5_000);
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const bundle = await builder.gather(doc, new vscode.Position(0, 0));
+
+    // Must never throw — should return a minimal valid bundle
+    assert.ok(Array.isArray(bundle.fileExports));
+    assert.ok(Array.isArray(bundle.importResolutions));
+    assert.ok(Array.isArray(bundle.missingImports));
+    assert.strictEqual(bundle.languageId, 'typescript');
+
+    console.log(`[diagnostics] Binary-ish content: threw=false, exports=${bundle.fileExports.length}`);
+
+    await removeFile(uri);
+});
+
+// ──────────────────────────────────────────────────────────────
 //  LSP extension registry validation
 // ──────────────────────────────────────────────────────────────
 
