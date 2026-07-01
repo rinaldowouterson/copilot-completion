@@ -1,3 +1,4 @@
+import * as vscode from 'vscode';
 import { LanguageSyntax } from './contextBundle';
 
 /**
@@ -92,6 +93,67 @@ function endsWithContinuation(line: string, syntax: LanguageSyntax): boolean {
 }
 
 /**
+ * Phase B (LSP path): Walk the SelectionRange chain to find the smallest
+ * containing range that ends within `maxLines` of the cursor line.
+ *
+ * Returns `undefined` when:
+ *   - LSP returns no ranges
+ *   - No containing range fits within `maxLines`
+ *   - The LSP call throws
+ *
+ * VS Code's SelectionRange forms a linked list (`parent` walks up to
+ * larger ranges). The traversal pattern:
+ *
+ *   [0] cursor position → [1] expression → [2] statement → [3] block → ... → file
+ *
+ * We want the **deepest containing range** whose `end` is within budget.
+ */
+export async function findStatementEndViaLSP(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    maxLines: number = 30,
+): Promise<number | undefined> {
+    try {
+        const ranges = await vscode.commands.executeCommand<vscode.SelectionRange[] | undefined>(
+            'vscode.executeSelectionRangeProvider',
+            document.uri,
+            [position],
+        );
+        if (!ranges || ranges.length === 0) return undefined;
+
+        // Walk the chain — smallest range that fits in budget wins.
+        // The "smallest that fits" is the deepest containing range whose end
+        // is within `maxLines` of the cursor — this gives the tightest
+        // statement boundary without overshooting.
+        let current: vscode.SelectionRange | undefined = ranges[0];
+        let best: vscode.Range | undefined;
+
+        while (current) {
+            if (current.range.contains(position)) {
+                const distance = current.range.end.line - position.line;
+                if (distance >= 0 && distance <= maxLines) {
+                    if (!best || current.range.end.line < best.end.line) {
+                        best = current.range;
+                    }
+                }
+            }
+            current = current.parent;
+        }
+
+        return best?.end.line;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Heuristic statement-end detection (renamed from `findStatementEnd` so the
+ * new async combined `findStatementEnd(document, position)` can use the
+ * LSP-first signature).
+ *
+ * Pure function — no LSP, no VS Code dependency on the document API.
+ * Used as the fallback when LSP SelectionRange is unavailable.
+ *
  * Walk forward from `startLine` to find the end of the current statement.
  *
  * The heuristic is applied in order:
@@ -100,29 +162,25 @@ function endsWithContinuation(line: string, syntax: LanguageSyntax): boolean {
  * 3. Continuation-operator scan
  * 4. Indentation reset (for indentation-significant languages)
  * 5. Budget cap at 30 lines
- *
- * Returns the 0-based line number where the statement ends,
- * or `startLine` if no end was found within budget.
- *
- * @param lines — Document lines array (split by '\n')
- * @param startLine — 0-based line of the cursor
- * @param syntax — Language syntax rules
- * @param maxLines — Maximum lines to scan forward (default 30)
  */
-export function findStatementEnd(
+export function findStatementEndHeuristic(
     lines: readonly string[],
     startLine: number,
     syntax: LanguageSyntax,
     maxLines: number = 30,
 ): number {
+    // Defensive: empty document or startLine past end → return what's safe
+    if (lines.length === 0) return 0;
+    const safeStart = Math.max(0, Math.min(startLine, lines.length - 1));
     const endOfDoc = lines.length - 1;
-    const budgetEnd = Math.min(startLine + maxLines, endOfDoc);
-    const baseIndent = guessIndent(lines[startLine]);
+    const budgetEnd = Math.min(safeStart + maxLines, endOfDoc);
+    const baseIndent = guessIndent(lines[safeStart]);
 
     let bracketDepth = 0;
 
-    for (let line = startLine; line <= budgetEnd; line++) {
+    for (let line = safeStart; line <= budgetEnd; line++) {
         const text = lines[line];
+        if (text === undefined) continue;
         const trimmed = text.trim();
 
         // Track bracket depth
@@ -168,6 +226,33 @@ export function findStatementEnd(
 
     // Budget cap reached, return the last line scanned
     return budgetEnd;
+}
+
+/**
+ * Phase B (combined): LSP SelectionRange primary + heuristic fallback.
+ *
+ * Tries the LSP first for exact statement boundaries; falls back to the
+ * pure heuristic when the LSP isn't indexed, doesn't support
+ * SelectionRange, or returns no useful range.
+ *
+ * Always resolves — callers never have to handle `undefined`.
+ */
+export async function findStatementEnd(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    maxLines: number = 30,
+): Promise<number> {
+    // 1. LSP path — exact boundaries
+    const lspResult = await findStatementEndViaLSP(document, position, maxLines);
+    if (lspResult !== undefined) return lspResult;
+
+    // 2. Heuristic fallback — fast, works for any language
+    return findStatementEndHeuristic(
+        document.getText().split('\n'),
+        position.line,
+        getSyntax(document.languageId),
+        maxLines,
+    );
 }
 
 /** Guess the indentation level (number of leading spaces) of a line. */

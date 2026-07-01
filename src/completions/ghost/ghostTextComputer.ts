@@ -491,3 +491,7 @@ export class GhostTextComputer {
         return escaped.length <= max ? escaped : escaped.substring(0, max) + '…';
     }
 }
+
+// TODO(phase-I): GHOST could also surface LSP code actions for multi-cursor
+// edits via additionalTextEdits on the completion item, but the use case is
+// narrower than NES. Defer until Phase H proves the pattern.

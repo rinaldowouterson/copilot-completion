@@ -8,3 +8,9 @@ node_modules
 .superpowers
 docs/superpowers/nesha_autocomplete/
 nesha_autocomplete/
+.plans
+.planning
+.plan
+scripts/setup-trust-for-tests.mjs
+.vscode/launch.json
+.DS_Store

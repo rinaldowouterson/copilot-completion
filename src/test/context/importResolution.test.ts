@@ -62,6 +62,12 @@ suite('Import Resolution', () => {
             const resolved = bundle.importResolutions[0];
             assert.ok(resolved.uri.length > 0, 'Import target URI should not be empty');
 
+            // Phase A: relativePath is mandatory
+            assert.ok(typeof resolved.relativePath === 'string' && resolved.relativePath.length > 0,
+                `Import resolution must have a non-empty relativePath, got: ${resolved.relativePath}`);
+            assert.ok(resolved.relativePath.endsWith('.ts'),
+                `relativePath should include file extension, got: ${resolved.relativePath}`);
+
             const exportNames = resolved.exports.map(e => e.name);
             assert.ok(exportNames.includes('User'),
                 `Expected 'User' in resolved exports, got [${exportNames.join(', ')}]`);
@@ -87,8 +93,9 @@ suite('Import Resolution', () => {
         const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
         assert.ok(Array.isArray(bundle.importResolutions), 'importResolutions should be an array');
+        assert.ok(Array.isArray(bundle.missingImports), 'missingImports should be an array');
+        assert.ok(Array.isArray(bundle.fileExports), 'fileExports should be an array');
         assert.strictEqual(bundle.languageId, 'typescript');
-        assert.strictEqual(bundle.missingImports.length, 0);
         assert.ok(bundle.languageSyntax !== undefined);
         assert.doesNotThrow(() => JSON.stringify(bundle));
     }).timeout(20000);

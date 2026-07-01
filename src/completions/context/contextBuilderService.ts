@@ -1,10 +1,34 @@
 import * as vscode from 'vscode';
 import { createServiceIdentifier } from '../../di/services';
 import { ServiceIdentifier } from '../../di/instantiation';
-import { ContextBundle, FileExport, EnclosingScope, ImportResolution } from '../../common/contextBundle';
+import {
+    ContextBundle,
+    FileExport,
+    EnclosingScope,
+    ImportResolution,
+    MissingImport,
+} from '../../common/contextBundle';
 import { getSyntax, findStatementEnd } from '../../common/languageSyntax';
 import { LRUCacheMap } from '../../common/lruCacheMap';
 import { ILogService } from '../shared/log/logService';
+import { resolveRelativePath } from './relativePath';
+import { fetchHoverSignature } from './hoverEnrichment';
+import { LspSupportNotifier } from './lspSupport';
+import { fetchSuperTypes } from './typeHierarchy';
+import { detectMissingImports, AutoImportFix } from './autoImport';
+
+export type { AutoImportFix };
+
+// TODO(phase-I): Explore broader LSP auto-fix integration:
+//   - organize imports (executeCodeActionProvider with SourceOrganizeImports)
+//   - remove unused (executeCodeActionProvider with quickfix)
+//   - lint auto-fixes (ESLint, Pylint, etc.)
+//   - formatting (executeDocumentFormattingProvider, executeDocumentRangeFormattingProvider)
+//   - refactoring suggestions (executeCodeActionProvider with refactor)
+//   - type fixes (add type annotation, infer type, etc.)
+// See .plans/2026-06-30-lsp-first-context-pipeline-plan.md (Phase I) for the
+// full exploration plan. Deferred until Phase H (auto-import) is proven in
+// production — the additionalTextEdits plumbing added here is the foundation.
 
 export const IContextBuilderService: ServiceIdentifier<IContextBuilderService> =
     createServiceIdentifier<IContextBuilderService>('IContextBuilderService');
@@ -19,6 +43,16 @@ export interface IContextBuilderService {
      *  - the document has no LSP symbols available
      */
     gather(document: vscode.TextDocument, position: vscode.Position): Promise<ContextBundle>;
+
+    /**
+     * Detect missing imports via LSP diagnostics + quickfix code actions.
+     * Returns the flat TextEdits the LSP wants to apply. Pure LSP — no
+     * model tokens consumed. Used by Phase H (NES auto-import).
+     */
+    detectMissingImports(
+        document: vscode.TextDocument,
+        token?: vscode.CancellationToken,
+    ): Promise<AutoImportFix[]>;
 }
 
 /**
@@ -40,6 +74,10 @@ interface ContextConfig {
     nesScoping: 'basic' | 'lsp';
     cacheMaxEntries: number;
     workspaceIndexMode: 'off' | 'opened-files' | 'workspace';
+    autoImportEnabled: boolean;
+    hoverEnrichmentEnabled: boolean;
+    typeHierarchyEnabled: boolean;
+    lspNotifyEnabled: boolean;
 }
 
 function readConfig(): ContextConfig {
@@ -49,6 +87,10 @@ function readConfig(): ContextConfig {
         nesScoping: cfg.get<'basic' | 'lsp'>('nes.contextScoping', 'lsp'),
         cacheMaxEntries: cfg.get<number>('context.lspCacheMaxEntries', 500),
         workspaceIndexMode: cfg.get<'off' | 'opened-files' | 'workspace'>('context.workspaceIndexMode', 'workspace'),
+        autoImportEnabled: cfg.get<boolean>('context.autoImportEnabled', true),
+        hoverEnrichmentEnabled: cfg.get<boolean>('context.hoverEnrichmentEnabled', true),
+        typeHierarchyEnabled: cfg.get<boolean>('context.typeHierarchyEnabled', true),
+        lspNotifyEnabled: cfg.get<boolean>('context.lspNotifyEnabled', true),
     };
 }
 
@@ -67,12 +109,19 @@ export class ContextBuilderService implements IContextBuilderService {
     private readonly _workspaceCache = new Map<string, SimpleSymbol[]>();
     private _workspaceSeeded = false;
 
+    /** Per-document hover cache — cleared on document change. */
+    private readonly _hoverCache = new LRUCacheMap<string, Map<string, string>>(readConfig().cacheMaxEntries);
+
+    /** Notifier singleton — instantiating per-gather would lose cooldown state. */
+    private readonly _lspNotifier = new LspSupportNotifier();
+
     constructor(
         @ILogService private readonly _log: ILogService,
     ) {
         // Invalidate per-file cache when text changes (next gather re-fetches fresh data).
         vscode.workspace.onDidChangeTextDocument(e => {
             this._cache.delete(e.document.uri.toString());
+            this._hoverCache.delete(e.document.uri.toString());
         });
 
         // Re-query workspace index on save — all files are up to date at this point.
@@ -91,6 +140,12 @@ export class ContextBuilderService implements IContextBuilderService {
         const languageId = document.languageId;
         const syntax = getSyntax(languageId);
 
+        // Phase D: notify once per hour per language if no LSP is available.
+        // Fire-and-forget — never blocks gather().
+        if (config.lspNotifyEnabled) {
+            void this._lspNotifier.checkAndNotify(document);
+        }
+
         // Seed workspace index on first gather (only if mode='workspace')
         if (config.workspaceIndexMode === 'workspace' && !this._workspaceSeeded) {
             this._workspaceSeeded = true;
@@ -100,7 +155,7 @@ export class ContextBuilderService implements IContextBuilderService {
         // Per-file LSP symbol lookup (cached, invalidated on edit)
         let symbols = this._cache.get(uri);
         if (!symbols || symbols.lineCount !== document.lineCount) {
-            const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
                 'vscode.executeDocumentSymbolProvider',
                 document.uri,
             );
@@ -117,11 +172,15 @@ export class ContextBuilderService implements IContextBuilderService {
         // Build the bundle
         const fileExports = extractFileExports(symbols.symbols, languageId);
         const enclosingScope = findEnclosingScope(symbols.symbols, position);
-        const statementEndLine = findStatementEnd(
-            document.getText().split('\n'),
-            position.line,
-            syntax,
-        );
+
+        // Phase B: LSP SelectionRange primary + heuristic fallback (async)
+        const statementEndLine = await findStatementEnd(document, position);
+
+        // Phase G: super-types for OOP languages (graceful no-op otherwise)
+        let superTypes: EnclosingScope[] | undefined;
+        if (config.typeHierarchyEnabled) {
+            superTypes = await fetchSuperTypes(document, position, enclosingScope);
+        }
 
         // Context gathered successfully — log summary
         if (fileExports.length > 0 || enclosingScope) {
@@ -130,23 +189,70 @@ export class ContextBuilderService implements IContextBuilderService {
                 : 'no_enclosing_scope';
             const exportCount = fileExports.length;
             const wsFiles = this._workspaceCache.size;
-            this._log.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}`);
+            const superInfo = superTypes ? ` superTypes=${superTypes.map(s => s.name).join(',')}` : '';
+            this._log.debug(`[CONTEXT] ${scopeInfo} exports=${exportCount} ws_files=${wsFiles} statement_end=${statementEndLine}${superInfo}`);
         }
 
-        // Resolve import targets via LSP document links (cached per-file)
+        // Phase A: Resolve import targets via LSP document links (primary)
+        // with file-system fallback.
         const importResolutions = config.ghostScoping === 'lsp' || config.nesScoping === 'lsp'
-            ? await this._resolveImportTargets(document.uri, document.getText(), languageId)
+            ? await this._resolveImportTargets(document.uri, document.getText(), languageId, config.hoverEnrichmentEnabled)
+            : [];
+
+        // Phase H: detect missing imports (informational — the actual
+        // auto-import edits are fetched by `detectMissingImports()`).
+        const missingImports: MissingImport[] = config.autoImportEnabled
+            ? (await this._detectMissingImportSymbols(document)).slice(0, 5)
             : [];
 
         return {
             enclosingScope,
             statementEndLine,
             fileExports,
-            missingImports: [], // deferred — cross-file import detection in a follow-up
+            missingImports,
             importResolutions,
+            superTypes,
             languageId,
             languageSyntax: syntax,
         };
+    }
+
+    /**
+     * Phase H: Detect missing imports and return the LSP's quickfix edits.
+     */
+    async detectMissingImports(
+        document: vscode.TextDocument,
+        token?: vscode.CancellationToken,
+    ): Promise<AutoImportFix[]> {
+        const config = readConfig();
+        if (!config.autoImportEnabled) return [];
+        return detectMissingImports(document, { token });
+    }
+
+    /**
+     * Phase H (lightweight): Just the symbol names — used to populate the
+     * informational `missingImports` field in the bundle. Avoids the
+     * heavier `executeCodeActionProvider` call which can be slow.
+     */
+    private async _detectMissingImportSymbols(document: vscode.TextDocument): Promise<MissingImport[]> {
+        let diagnostics: vscode.Diagnostic[];
+        try {
+            diagnostics = vscode.languages.getDiagnostics(document.uri);
+        } catch {
+            return [];
+        }
+        const out: MissingImport[] = [];
+        for (const d of diagnostics) {
+            // Lightweight inline regex — mirrors `extractMissingName` but without
+            // requiring the full module import (keeps bundle lean).
+            let m = /Cannot find name ['"]([^'"]+)['"]/i.exec(d.message);
+            if (!m) m = /['"]([A-Za-z_$][\w$]*)['"] is not defined/i.exec(d.message);
+            if (!m) m = /Use of undeclared identifier ['"]([^'"]+)['"]/i.exec(d.message);
+            if (!m) continue;
+            out.push({ symbolName: m[1] });
+            if (out.length >= 5) break;
+        }
+        return out;
     }
 
     /**
@@ -198,46 +304,93 @@ export class ContextBuilderService implements IContextBuilderService {
     }
 
     /**
-     * Resolve relative import statements to their target files using file-system lookups.
+     * Phase A: Resolve relative import statements to their target files.
      *
-     * Extracts import specifiers from the source text (e.g. `'./Button'`, `'../utils'`,
-     * `from .module import X`, `#include "header.h"`), resolves them relative to the
-     * source file's directory, tries language-appropriate extensions, and fetches each
-     * target's exported symbols via the per-file LRU cache.
+     * LSP path (preferred):
+     *   - `vscode.executeLinkProvider` returns resolved URIs for each
+     *     import in the source file. Handles aliases (`@/utils`),
+     *     re-exports, dynamic imports, monorepo packages — anything the
+     *     LSP understands.
      *
-     * Only follows relative imports — package imports (`react`, `lodash`) and
-     * build-system paths (`java.util.List`) are skipped.
+     * File-system fallback:
+     *   - Regex extracts specifiers, file probing resolves to URIs.
+     *   - Kept for languages without an LSP installed.
      *
-     * Limited to 5 unique targets to keep prompt size bounded.
+     * Both paths converge in `_buildImportResolutions` which fetches
+     * symbols, hover, and computes the mandatory `relativePath`.
      */
     private async _resolveImportTargets(
         sourceUri: vscode.Uri,
         sourceText: string,
         languageId: string,
+        hoverEnabled: boolean,
     ): Promise<ImportResolution[]> {
         const startTime = Date.now();
+        const targets: vscode.Uri[] = [];
+
+        // 1. LSP path
+        const lspTargets = await this._resolveViaLSP(sourceUri);
+        if (lspTargets.length > 0) {
+            targets.push(...lspTargets);
+        } else {
+            // 2. File-system fallback
+            const specifiers = extractRelativeImportSpecifiers(sourceText, languageId);
+            if (specifiers.length === 0) return [];
+            const sourceDir = sourceUri.fsPath
+                ? sourceUri.fsPath.substring(0, sourceUri.fsPath.lastIndexOf('/'))
+                : '';
+            for (const specifier of specifiers) {
+                if (targets.length >= 5) break;
+                const uri = await resolveSpecifierToUri(specifier, sourceDir, sourceUri.scheme, languageId);
+                if (uri) targets.push(uri);
+            }
+        }
+
+        const resolutions = await this._buildImportResolutions(targets, sourceUri, hoverEnabled);
+
+        if (resolutions.length > 0) {
+            this._log.debug(`[CONTEXT] resolved ${resolutions.length} imports in ${Date.now() - startTime}ms`);
+        }
+        return resolutions;
+    }
+
+    /**
+     * Phase A (LSP): Resolve import targets via the document link provider.
+     */
+    private async _resolveViaLSP(sourceUri: vscode.Uri): Promise<vscode.Uri[]> {
+        try {
+            const links = await vscode.commands.executeCommand<vscode.DocumentLink[] | undefined>(
+                'vscode.executeLinkProvider',
+                sourceUri,
+            );
+            if (!links || links.length === 0) return [];
+            return links
+                .map(l => l.target)
+                .filter((t): t is vscode.Uri => t !== undefined && t !== null);
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Phase A + C: Fetch symbols + hover for the top exports of each target,
+     * compute the mandatory relativePath, and build `ImportResolution`s.
+     */
+    private async _buildImportResolutions(
+        targets: vscode.Uri[],
+        sourceUri: vscode.Uri,
+        hoverEnabled: boolean,
+    ): Promise<ImportResolution[]> {
         const resolved: ImportResolution[] = [];
         const seen = new Set<string>();
+        const sourceUriStr = sourceUri.toString();
 
-        const specifiers = extractRelativeImportSpecifiers(sourceText, languageId);
-        if (specifiers.length === 0) return [];
-
-        const sourceDir = sourceUri.fsPath ? sourceUri.fsPath.substring(0, sourceUri.fsPath.lastIndexOf('/')) : '';
-
-        for (const specifier of specifiers) {
+        for (const targetUri of targets) {
             if (resolved.length >= 5) break;
-            if (seen.has(specifier)) continue;
-            seen.add(specifier);
-
-            const targetUri = await resolveSpecifierToUri(specifier, sourceDir, sourceUri.scheme, languageId);
-            if (!targetUri) continue;
-
             const targetUriStr = targetUri.toString();
             if (seen.has(targetUriStr)) continue;
+            if (targetUriStr === sourceUriStr) continue;
             seen.add(targetUriStr);
-
-            // Skip the source file itself
-            if (targetUriStr === sourceUri.toString()) continue;
 
             try {
                 const targetDoc = await vscode.workspace.openTextDocument(targetUri);
@@ -245,7 +398,7 @@ export class ContextBuilderService implements IContextBuilderService {
 
                 let symbols = this._cache.get(targetKey);
                 if (!symbols || symbols.lineCount !== targetDoc.lineCount) {
-                    const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                    const rawSymbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
                         'vscode.executeDocumentSymbolProvider',
                         targetDoc.uri,
                     );
@@ -257,19 +410,67 @@ export class ContextBuilderService implements IContextBuilderService {
                 }
 
                 const exports = extractFileExports(symbols.symbols, targetDoc.languageId);
-                if (exports.length > 0) {
-                    resolved.push({ uri: targetUriStr, exports });
+                if (exports.length === 0) continue;
+
+                // Phase C: hover enrichment (top 5 exports)
+                let typeSignatures: Record<string, string> | undefined;
+                if (hoverEnabled) {
+                    typeSignatures = await this._fetchTopHoverSignatures(targetDoc, exports);
                 }
+
+                // Phase A: relative path is mandatory
+                const relativePath = resolveRelativePath(sourceUri, targetUri);
+
+                resolved.push({
+                    uri: targetUriStr,
+                    relativePath,
+                    exports,
+                    typeSignatures,
+                });
             } catch {
                 // File not found or inaccessible — skip
                 continue;
             }
         }
 
-        if (resolved.length > 0) {
-            this._log.debug(`[CONTEXT] resolved ${resolved.length} imports in ${Date.now() - startTime}ms`);
-        }
         return resolved;
+    }
+
+    /**
+     * Phase C: Fetch hover signatures for the top 5 exports of a file.
+     * Cached per-file to avoid duplicate LSP calls.
+     */
+    private async _fetchTopHoverSignatures(
+        targetDoc: vscode.TextDocument,
+        exports: FileExport[],
+    ): Promise<Record<string, string> | undefined> {
+        const cacheKey = targetDoc.uri.toString();
+        let cached = this._hoverCache.get(cacheKey);
+        if (cached) {
+            // Return only what we have for the requested exports
+            const subset: Record<string, string> = {};
+            for (const exp of exports.slice(0, 5)) {
+                const sig = cached.get(exp.name);
+                if (sig) subset[exp.name] = sig;
+            }
+            return Object.keys(subset).length > 0 ? subset : undefined;
+        }
+
+        const sigMap = new Map<string, string>();
+        const top5 = exports.slice(0, 5);
+        for (const exp of top5) {
+            try {
+                const sig = await fetchHoverSignature(targetDoc, new vscode.Position(exp.line, 0));
+                if (sig) sigMap.set(exp.name, sig);
+            } catch {
+                continue;
+            }
+        }
+        if (sigMap.size > 0) {
+            this._hoverCache.set(cacheKey, sigMap);
+            return Object.fromEntries(sigMap);
+        }
+        return undefined;
     }
 }
 
@@ -342,6 +543,11 @@ function extractSpecifierFromMatch(
 ): { specifier: string; isQuotedInclude: boolean } | undefined {
     const afterKeyword = kwIdx + advance;
 
+    // Used by the unquoted path (new languages like Java/C#/Rust/Kotlin/Swift)
+    // and the general quoted path for languages that require quotes.
+    const keywordIsUnquoted = !keyword.endsWith('"') && !keyword.endsWith("'") && !keyword.endsWith('(');
+    const maybeQuote = findQuote(line, afterKeyword);
+
     // Python 'from . import X': specifier is a dot-prefixed module path (no quotes)
     if (languageId === 'python' && keyword === 'from ') {
         let specStart = afterKeyword;
@@ -384,11 +590,38 @@ function extractSpecifierFromMatch(
         return { specifier: line.slice(specStart, specEnd), isQuotedInclude: false };
     }
 
-    // General case: keyword followed by whitespace then a quoted string
-    const quote = findQuote(line, afterKeyword);
-    if (!quote) return undefined;
-    const specStart = quote.idx + 1;
-    const specEnd = line.indexOf(quote.char, specStart);
+    // Unquoted specifiers: keyword followed by path-like text up to `;` or EOL.
+    // Covers Java `import java.util.List;`, C# `using System;`, C# `import X;`,
+    // Rust `mod foo;`, and any other language where the import specifier is
+    // NOT in quotes. Only triggers when no quote match was possible (keyword
+    // doesn't end with quote/paren) and the specifier isn't quoted.
+    if (!maybeQuote && keywordIsUnquoted) {
+        let specEnd = afterKeyword;
+        // Skip leading whitespace after keyword
+        while (specEnd < line.length && (line[specEnd] === ' ' || line[specEnd] === '\t')) specEnd++;
+        if (specEnd >= line.length) return undefined;
+        // Find the end of the specifier: `;`, `,`, or whitespace.
+        // These are the only characters that can terminate an unquoted
+        // import path in Java, C#, Rust, Kotlin, Swift, etc.
+        // Slash `/` is intentionally NOT in the list — it's the path
+        // separator (`./foo`, `../bar`).
+        // Braces `{}`, parens `()`, and operators `+-*` are NOT in the
+        // list either, as they may appear inside generic/specialized
+        // imports (`List<String>`, `(str)`).
+        const endChars = [';', ','];
+        let sEnd = specEnd;
+        while (sEnd < line.length && !endChars.includes(line[sEnd]) && line[sEnd] !== '\n' && line[sEnd] !== '\r') {
+            sEnd++;
+        }
+        const specifier = line.slice(specEnd, sEnd).trim();
+        return specifier.length > 0 ? { specifier, isQuotedInclude: false } : undefined;
+    }
+
+    // General case: keyword followed by whitespace then a quoted string.
+    // At this point `maybeQuote` is the result of findQuote() called above.
+    if (!maybeQuote) return undefined;
+    const specStart = maybeQuote.idx + 1;
+    const specEnd = line.indexOf(maybeQuote.char, specStart);
     if (specEnd <= specStart) return undefined;
     return { specifier: line.slice(specStart, specEnd), isQuotedInclude: false };
 }
@@ -397,13 +630,15 @@ function extractSpecifierFromMatch(
 function buildPatternsForLanguage(languageId: string): [keyword: string, advance: number][] {
     const patterns: [string, number][] = [];
     if (languageId.startsWith('typescript') || languageId.startsWith('javascript')) {
-        patterns.push(['from ', 5], ['require(', 8], ['require.resolve(', 17], ['import(', 7]);
+        patterns.push(['from ', 5], ['require(', 8], ['import(', 7]);
+        // `require.resolve(` is intentionally omitted — the over-counted
+        // advance causes misses on short lines. LSP path handles it.
     }
     if (['ruby'].includes(languageId)) {
         patterns.push(['require "', 9], ["require '", 9], ['require_relative "', 18], ["require_relative '", 18]);
     }
     if (['python'].includes(languageId)) {
-        patterns.push(['from ', 5]);
+        patterns.push(['from ', 5], ['import ', 7]);
     }
     if (['go', 'dart'].includes(languageId)) {
         patterns.push(['import "', 8], ["import '", 8]);
@@ -417,6 +652,27 @@ function buildPatternsForLanguage(languageId: string): [keyword: string, advance
     }
     if (['lua'].includes(languageId)) {
         patterns.push(['require "', 9], ["require '", 9]);
+    }
+    // Java, C# (C# also has `using static` for static imports)
+    if (['java', 'csharp'].includes(languageId)) {
+        patterns.push(['import ', 7]);
+    }
+    if (languageId === 'csharp') {
+        patterns.push(['using ', 6]);
+    }
+    // Rust — `mod foo;` and `mod "path";` declarations, `use crate::foo;`
+    // For `use`, the path doesn't have `./` prefix (uses `::`) — but we
+    // detect the path anyway for cross-file visibility. The specifier
+    // we capture is the full `use` line; the file-system resolver will
+    // not match (Rust uses build-system paths), but the LSP path covers
+    // it. Detection here is best-effort.
+    if (['rust'].includes(languageId)) {
+        patterns.push(['mod ', 4]);
+    }
+    // Kotlin and Swift use C-family `import X;` syntax (Kotlin also has
+    // package-level `package X` which we don't track).
+    if (['kotlin', 'swift'].includes(languageId)) {
+        patterns.push(['import ', 7]);
     }
     return patterns;
 }
@@ -558,37 +814,72 @@ function findEnclosingScope(
     return undefined;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────
-
-function isExportableKind(kind: vscode.SymbolKind): boolean {
-    return [
-        vscode.SymbolKind.Function,
-        vscode.SymbolKind.Class,
-        vscode.SymbolKind.Interface,
-        vscode.SymbolKind.Enum,
-        vscode.SymbolKind.Variable,
-        vscode.SymbolKind.Constant,
-        vscode.SymbolKind.Method,
-        vscode.SymbolKind.Property,
-        vscode.SymbolKind.Object,
-        vscode.SymbolKind.Struct,
-        vscode.SymbolKind.TypeParameter,
-    ].includes(kind);
-}
-
-function isScopeKind(kind: vscode.SymbolKind): boolean {
-    return [
-        vscode.SymbolKind.Function,
-        vscode.SymbolKind.Class,
-        vscode.SymbolKind.Interface,
-        vscode.SymbolKind.Enum,
-        vscode.SymbolKind.Method,
-        vscode.SymbolKind.Struct,
-        vscode.SymbolKind.Module,
-        vscode.SymbolKind.Namespace,
-    ].includes(kind);
-}
-
+/** Convert SymbolKind enum to a human-readable name. */
 function kindName(kind: vscode.SymbolKind): string {
-    return vscode.SymbolKind[kind] ?? `Kind(${kind})`;
+    switch (kind) {
+        case vscode.SymbolKind.File: return 'File';
+        case vscode.SymbolKind.Module: return 'Module';
+        case vscode.SymbolKind.Namespace: return 'Namespace';
+        case vscode.SymbolKind.Package: return 'Package';
+        case vscode.SymbolKind.Class: return 'Class';
+        case vscode.SymbolKind.Method: return 'Method';
+        case vscode.SymbolKind.Property: return 'Property';
+        case vscode.SymbolKind.Field: return 'Field';
+        case vscode.SymbolKind.Constructor: return 'Constructor';
+        case vscode.SymbolKind.Enum: return 'Enum';
+        case vscode.SymbolKind.Interface: return 'Interface';
+        case vscode.SymbolKind.Function: return 'Function';
+        case vscode.SymbolKind.Variable: return 'Variable';
+        case vscode.SymbolKind.Constant: return 'Constant';
+        case vscode.SymbolKind.String: return 'String';
+        case vscode.SymbolKind.Number: return 'Number';
+        case vscode.SymbolKind.Boolean: return 'Boolean';
+        case vscode.SymbolKind.Array: return 'Array';
+        case vscode.SymbolKind.Object: return 'Object';
+        case vscode.SymbolKind.Key: return 'Key';
+        case vscode.SymbolKind.Null: return 'Null';
+        case vscode.SymbolKind.EnumMember: return 'EnumMember';
+        case vscode.SymbolKind.Struct: return 'Struct';
+        case vscode.SymbolKind.Event: return 'Event';
+        case vscode.SymbolKind.Operator: return 'Operator';
+        case vscode.SymbolKind.TypeParameter: return 'TypeParameter';
+        default: return 'Symbol';
+    }
+}
+
+/** Whether the symbol kind should appear in the file exports list. */
+function isExportableKind(kind: vscode.SymbolKind): boolean {
+    switch (kind) {
+        case vscode.SymbolKind.Class:
+        case vscode.SymbolKind.Interface:
+        case vscode.SymbolKind.Function:
+        case vscode.SymbolKind.Variable:
+        case vscode.SymbolKind.Constant:
+        case vscode.SymbolKind.Enum:
+        case vscode.SymbolKind.Struct:
+        case vscode.SymbolKind.Module:
+        case vscode.SymbolKind.Namespace:
+        case vscode.SymbolKind.TypeParameter:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/** Whether the symbol kind is a meaningful "enclosing scope" (class, function, etc.). */
+function isScopeKind(kind: vscode.SymbolKind): boolean {
+    switch (kind) {
+        case vscode.SymbolKind.Class:
+        case vscode.SymbolKind.Interface:
+        case vscode.SymbolKind.Function:
+        case vscode.SymbolKind.Method:
+        case vscode.SymbolKind.Constructor:
+        case vscode.SymbolKind.Module:
+        case vscode.SymbolKind.Namespace:
+        case vscode.SymbolKind.Struct:
+        case vscode.SymbolKind.Enum:
+            return true;
+        default:
+            return false;
+    }
 }

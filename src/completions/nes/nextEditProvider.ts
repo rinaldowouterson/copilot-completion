@@ -7,6 +7,8 @@ import { createServiceIdentifier } from '../../di/services';
 import { NesWorkflow } from './core/nesWorkflow';
 import { NextCursorPredictor } from './nextCursorPredictor';
 import { InlineSuggestionResolver } from './core/inlineSuggestionResolver';
+import { IContextBuilderService, AutoImportFix } from '../context/contextBuilderService';
+import { containsChatMarkup } from '../../common/chatMarkup';
 
 export const INesProvider = createServiceIdentifier<INesProvider>('INesProvider');
 
@@ -28,6 +30,7 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         @IInstantiationService private readonly _instantiationService: IInstantiationService,
         @INesConfigProvider private readonly _config: INesConfigProvider,
         @ILogService private readonly _log: ILogService,
+        @IContextBuilderService private readonly _contextBuilder: IContextBuilderService,
     ) {
         this._workflow = this._instantiationService.createInstance(NesWorkflow);
         this._cursorPredictor = this._instantiationService.createInstance(NextCursorPredictor);
@@ -70,6 +73,10 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         }
 
         const requestUuid = `nes-${Date.now()}-${++_requestSeq}`;
+
+        // Phase H: in parallel with the workflow, detect missing imports.
+        // If found and no NES edit is produced, surface the auto-import suggestion.
+        const autoImportPromise = this._tryAutoImportSuggestion(document, position, requestUuid, token);
 
         // Primary NES request
         const { editResult, promptPieces } = await this._workflow.execute(document, position, false, token);
@@ -122,6 +129,28 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
         }
 
         this._log.debug(`[NES]  NO_RESULT — retry also failed`);
+
+        // Phase H fallback: if no NES edit, but missing imports were detected,
+        // surface the auto-import suggestion (still zero model tokens).
+        if (token.isCancellationRequested) return undefined;
+        const autoImport = await autoImportPromise;
+        if (autoImport) {
+            const info = new NesCompletionInfo(
+                {
+                    range: new vscode.Range(position, position),
+                    edit: '',
+                    documentBeforeEdits: '',
+                    fullEditText: '',
+                    edits: [],
+                },
+                document.uri.toString(),
+                document,
+                requestUuid,
+            );
+            autoImport.info = info;
+            return new NesCompletionList(requestUuid, [autoImport]);
+        }
+
         return undefined;
     }
 
@@ -209,4 +238,57 @@ export class NextEditProvider implements INesProvider, vscode.InlineCompletionIt
 
         return new NesCompletionList(requestUuid, [item]);
     }
+
+    /**
+     * Phase H: Build an NES inline completion that adds missing imports via
+     * the LSP's quickfix code actions. Returns `undefined` when there are
+     * no missing imports, when chat markup is detected in the document,
+     * or when the LSP returned no actionable fix.
+     *
+     * Zero model tokens consumed — pure LSP.
+     */
+    private async _tryAutoImportSuggestion(
+        document: vscode.TextDocument,
+        position: vscode.Position,
+        requestUuid: string,
+        token: vscode.CancellationToken,
+    ): Promise<NesCompletionItem | undefined> {
+        // Bail if the document has chat editing markup (leaked session tags)
+        if (containsChatMarkup(document.getText())) return undefined;
+
+        const fixes: AutoImportFix[] = await this._contextBuilder.detectMissingImports(document, token);
+        if (fixes.length === 0) return undefined;
+
+        // Flatten all edits from all fixes into one additionalTextEdits array
+        const additionalTextEdits: vscode.TextEdit[] = [];
+        for (const fix of fixes) {
+            for (const edit of fix.edits) additionalTextEdits.push(edit);
+        }
+        if (additionalTextEdits.length === 0) return undefined;
+
+        this._log.debug(`[NES]  PHASE_H — ${fixes.length} missing import fix(es), ${additionalTextEdits.length} edit(s)`);
+
+        const label = `✨ Add ${fixes.length} missing import${fixes.length > 1 ? 's' : ''}`;
+        return {
+            insertText: '',
+            range: new vscode.Range(position, position),
+            additionalTextEdits,
+            isInlineEdit: true,
+            isInlineCompletion: false,
+            showInlineEditMenu: true,
+            showInlinedDiff: false,
+            shouldBeInlineEdit: true,
+            displayLocation: {
+                range: new vscode.Range(position, position),
+                label,
+            },
+        };
+    }
 }
+
+// TODO(phase-I): Beyond auto-imports, surface other LSP code actions as NES suggestions:
+//   - Quick fixes (e.g., "Add missing return statement")
+//   - Refactoring (e.g., "Extract function", "Rename symbol")
+//   - Source actions (e.g., "Organize imports", "Remove unused")
+// Use the same additionalTextEdits mechanism proven in Phase H.
+// Group by CodeActionKind so similar fixes can be surfaced together.

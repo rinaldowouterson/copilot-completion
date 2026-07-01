@@ -26,6 +26,9 @@ package-lock.json
 # End-user VSIX built artifacts (don't recursively package prior VSIX files)
 *.vsix
 
+# macOS metadata
+.DS_Store
+
 # Design docs / specs are repo-only, never run at extension runtime
 docs/**
 nesha_autocomplete/

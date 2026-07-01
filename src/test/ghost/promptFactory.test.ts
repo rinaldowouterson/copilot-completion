@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import { GhostPromptFactory } from '../../completions/ghost/promptFactory';
 import { DiagnosticSummary } from '../../completions/ghost/types';
+import { ContextBundle, FileExport, ImportResolution } from '../../common/contextBundle';
 
 suite('GhostPromptFactory', () => {
     test('should replace {prefix} and {suffix} placeholders', () => {
@@ -115,5 +116,123 @@ suite('GhostPromptFactory', () => {
         // Only 5 diagnostics should appear
         const matches = result.match(/diagnostics:/g);
         assert.strictEqual(matches?.length, 5);
+    });
+
+    test('renders file exports in single-line name:type format (Phase C)', () => {
+        const factory = new GhostPromptFactory();
+        const fileExports: FileExport[] = [
+            { name: 'getUser', kind: 'Function', line: 1, type: 'async(id: string): Promise<User>' },
+            { name: 'createUser', kind: 'Function', line: 2, type: 'async(d: CreateUserDTO): Promise<User>' },
+        ];
+        const context: ContextBundle = {
+            fileExports,
+            missingImports: [],
+            importResolutions: [],
+            languageId: 'typescript',
+            languageSyntax: { semicolons: true, indentationSignificant: false, brackets: [], continuationOperators: [], comment: '//' },
+        };
+        const result = factory.createPrompt({
+            template: '{prefix}',
+            prefix: 'code',
+            suffix: '',
+            languageId: 'typescript',
+            diagnostics: [],
+            recentEdits: [],
+            context,
+        });
+        assert.ok(result.includes('getUser:async(id: string): Promise<User>'),
+            `Expected hover-style signature, got: ${result}`);
+        assert.ok(result.includes('// exports:'),
+            `Expected // exports: prefix, got: ${result}`);
+    });
+
+    test('falls back to kind when no hover type is provided', () => {
+        const factory = new GhostPromptFactory();
+        const fileExports: FileExport[] = [
+            { name: 'Helper', kind: 'Class', line: 1 },
+        ];
+        const context: ContextBundle = {
+            fileExports,
+            missingImports: [],
+            importResolutions: [],
+            languageId: 'typescript',
+            languageSyntax: { semicolons: true, indentationSignificant: false, brackets: [], continuationOperators: [], comment: '//' },
+        };
+        const result = factory.createPrompt({
+            template: '{prefix}',
+            prefix: 'code',
+            suffix: '',
+            languageId: 'typescript',
+            diagnostics: [],
+            recentEdits: [],
+            context,
+        });
+        assert.ok(result.includes('Helper:Class'),
+            `Expected kind fallback, got: ${result}`);
+    });
+
+    test('wraps import resolutions in <|imports|> tag and uses relativePath (Phase A)', () => {
+        const factory = new GhostPromptFactory();
+        const importResolutions: ImportResolution[] = [
+            {
+                uri: 'file:///abs/path/utils/helpers.ts',
+                relativePath: './utils/helpers.ts',
+                exports: [
+                    { name: 'formatDate', kind: 'Function', line: 1, type: '(d: Date): string' },
+                ],
+                typeSignatures: { formatDate: '(d: Date): string' },
+            },
+        ];
+        const context: ContextBundle = {
+            fileExports: [],
+            missingImports: [],
+            importResolutions,
+            languageId: 'typescript',
+            languageSyntax: { semicolons: true, indentationSignificant: false, brackets: [], continuationOperators: [], comment: '//' },
+        };
+        const result = factory.createPrompt({
+            template: '{prefix}',
+            prefix: 'code',
+            suffix: '',
+            languageId: 'typescript',
+            diagnostics: [],
+            recentEdits: [],
+            context,
+        });
+        assert.ok(result.includes('<|imports|>'), `Expected imports tag, got: ${result}`);
+        assert.ok(result.includes('<|/imports|>'), `Expected closing imports tag, got: ${result}`);
+        assert.ok(result.includes('./utils/helpers.ts: formatDate:(d: Date): string'),
+            `Expected relative path + hover signature, got: ${result}`);
+        assert.ok(!result.includes('file:///abs/path/'),
+            `Output must not contain absolute URI: ${result}`);
+    });
+
+    test('renders missing imports (Phase H)', () => {
+        const factory = new GhostPromptFactory();
+        const context: ContextBundle = {
+            fileExports: [],
+            missingImports: [
+                { symbolName: 'debounce', sourceModule: 'lodash' },
+                { symbolName: 'validateUser' },
+            ],
+            importResolutions: [],
+            languageId: 'typescript',
+            languageSyntax: { semicolons: true, indentationSignificant: false, brackets: [], continuationOperators: [], comment: '//' },
+        };
+        const result = factory.createPrompt({
+            template: '{prefix}',
+            prefix: 'code',
+            suffix: '',
+            languageId: 'typescript',
+            diagnostics: [],
+            recentEdits: [],
+            context,
+        });
+        assert.ok(result.includes('// missing:'),
+            `Expected missing imports line, got: ${result}`);
+        assert.ok(result.includes('debounce from lodash'),
+            `Expected symbol + sourceModule, got: ${result}`);
+        assert.ok(result.includes('validateUser'),
+            `Expected symbol-only entry, got: ${result}`);
     });
 });

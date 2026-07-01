@@ -9,7 +9,8 @@ import { StringText } from '../stubs/abstractText';
 import { Position } from '../stubs/position';
 import { OffsetRange } from '../stubs/offsetRange';
 import { EditWindowResolver } from './editWindowResolver';
-import { ContextBundle } from '../../../common/contextBundle';
+import { ContextBundle, FileExport, ImportResolution } from '../../../common/contextBundle';
+import { buildImportLine } from '../../ghost/promptFactory';
 
 export interface PromptAssembly {
     promptPieces: PromptPieces;
@@ -91,20 +92,45 @@ export class PromptAssembler {
         // Context bundle additions (only when LSP data is available)
         let contextNote = '';
         if (context) {
+            // Phase H: missing imports (informational)
+            if (context.missingImports.length > 0) {
+                const parts = context.missingImports.slice(0, 5)
+                    .map(m => m.sourceModule ? `${m.symbolName} from ${m.sourceModule}` : m.symbolName);
+                contextNote += `<missing_imports>\n${parts.join(', ')}\n</missing_imports>\n`;
+            }
+
+            // File exports — single-line, all-or-nothing truncation
             if (context.fileExports.length > 0) {
-                const exportsList = context.fileExports.map(e => `${e.name} (${e.kind})`).join(', ');
-                contextNote += `<|file_exports|>\n${exportsList}\n<|/file_exports|>\n`;
+                const parts: string[] = [];
+                for (const exp of context.fileExports.slice(0, 8)) {
+                    const type = exp.type ?? exp.kind;
+                    parts.push(`${exp.name}:${type}`);
+                }
+                contextNote += `<file_exports>\n${parts.join(', ')}\n</file_exports>\n`;
             }
+
+            // Scope
             if (context.enclosingScope) {
-                contextNote += `<|scope|>\n${context.enclosingScope.kind} ${context.enclosingScope.name} (line ${context.enclosingScope.startLine}–${context.enclosingScope.endLine})\n<|/scope|>\n`;
+                const scope = context.enclosingScope;
+                let scopeLine = `${scope.kind} ${scope.name} (line ${scope.startLine}–${scope.endLine})`;
+                // Phase G: append super-types inline when there's exactly one
+                if (context.superTypes && context.superTypes.length === 1) {
+                    scopeLine += ` extends ${context.superTypes[0].name}`;
+                }
+                contextNote += `<scope>\n${scopeLine}\n</scope>\n`;
+
+                // Phase G: multi-super-type case — separate tag for clarity
+                if (context.superTypes && context.superTypes.length > 1) {
+                    const names = context.superTypes.map(s => s.name).join(', ');
+                    contextNote += `<super_types>\n${names}\n</super_types>\n`;
+                }
             }
+
+            // Imports — wrapped in tag with relativePath + hover signatures
             if (context.importResolutions && context.importResolutions.length > 0) {
-                const lines = context.importResolutions.slice(0, 5).map(imp => {
-                    const pathLabel = imp.uri.split('/').pop() || imp.uri;
-                    const names = imp.exports.map(e => e.name).join(', ');
-                    return `${pathLabel} → ${names}`;
-                });
-                contextNote += `<|imports|>\n${lines.join('\n')}\n<|/imports|>\n`;
+                const lines = context.importResolutions.slice(0, 5)
+                    .map(imp => buildImportLine(imp));
+                contextNote += `<imports>\n${lines.join('\n')}\n</imports>\n`;
             }
         }
 

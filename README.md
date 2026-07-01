@@ -121,12 +121,85 @@ src/
 │   │   ├── response/   # Response pipeline, differ, filter chain
 │   │   └── stubs/      # Data type stubs
 │   └── shared/         # Shared LLM adapters and log service
-├── common/             # Shared utilities (arrays, result type, suffix trim)
+├── common/             # Shared utilities (arrays, result type, suffix trim, context bundle)
+├── completions/context/# Context pipeline: LSP-first imports, hover, type hierarchy, auto-import
 ├── config/             # Configuration providers (GHOST + NES)
 ├── di/                 # Dependency injection container
 ├── test/               # Test suites
 └── ui/                 # Status bar panel
 ```
+
+## Language Support
+
+cc-completion uses VS Code's Language Server Protocol (LSP) to enrich the
+prompt context with **cross-file information** — import resolution,
+hover-derived type signatures, exact statement boundaries, class hierarchy,
+and missing-import diagnostics.
+
+The completion itself (GHOST fill-in-the-middle, NES edit prediction) is
+**file-local** — it operates on prefix/suffix of the current document. The
+LSP only matters for the *context* the model sees before the prefix.
+
+### When does an LSP matter?
+
+| Language characteristic | LSP impact |
+|---|---|
+| Many cross-file imports (`from .foo import bar`) | **High** — hover signatures on imports dramatically reduce model hallucination |
+| Class/interface hierarchies (Java, C#, OOP TS) | **High** — super-types disambiguate method overrides |
+| Single-file scripts (SQL, PowerShell, simple Bash) | **None** — no imports, no cross-file refs; the notification would be noise |
+| Built-in TS server (TS/JS) | **None** — VS Code ships the TS server, no extension needed |
+
+### Recommended LSP extensions
+
+Languages where our context pipeline materially benefits:
+
+| Language | LSP extension | Publisher | Prerequisite |
+|---|---|---|---|
+| TypeScript / JavaScript | *(built-in TS server)* | Microsoft | — |
+| Python | `ms-python.vscode-pylance` | Microsoft | `ms-python.python` (Python extension — interpreter discovery) |
+| C# | `ms-dotnettools.csharp` | Microsoft | — (Roslyn LSP is bundled) |
+| C / C++ | `ms-vscode.cpptools` | Microsoft | — |
+| Java | `redhat.java` | Red Hat | — |
+| Go | `golang.go` | Go Team | — |
+| Rust | `rust-lang.rust-analyzer` | rust-lang | — |
+| PHP | `bmewburn.vscode-intelephense-client` | Ben Mewburn | — |
+| Ruby | `shopify.ruby-lsp` | Shopify | — |
+| Dart | `dart-code.dart-code` | Dart Code | — |
+| Lua | `sumneko.lua` | sumneko | — |
+
+When a language server is missing, cc-completion falls back to regex-based
+import extraction and a heuristic statement-end scanner, and shows a
+once-per-hour-per-language info message with four actions:
+
+1. **Install Directly** — installs the extension in-IDE via the internal
+   `workbench.extensions.installExtension` command. VS Code shows the
+   trust-publisher dialog ("Do you trust the publisher X?"); click
+   "Yes, I trust" to complete the install. A progress notification
+   ("Installing X…") stays visible until the install actually finishes
+   (detected via `extensions.onDidChange`), then the cooldown is reset
+   so the next completion picks up the new LSP. For Python, the
+   prerequisite extension (`ms-python.python`) is installed first and
+   waited on before the LSP install starts.
+2. **Show in Extensions Marketplace** — opens the extension's detail
+   page in VS Code's Extensions view via the internal
+   `vscode:extension/<id>` URI. User reads the description / reviews and
+   clicks Install themselves. Falls back to the marketplace URL in the
+   browser if the internal URI is rejected.
+3. **Copy install command** — copies `code --install-extension …` to the
+   clipboard (with the prerequisite prepended for Python) so you can
+   paste it into a terminal.
+4. **Dismiss** — closes the notification.
+
+Without an LSP, the prompt context will be less rich (no hover signatures,
+no class hierarchy, no missing-import detection).
+
+### Languages intentionally NOT in the map
+
+| Language | Reason |
+|---|---|
+| SQL (`ms-mssql.mssql`) | One file = one query batch — no imports, no useful hover |
+| PowerShell (`ms-vscode.powershell`) | One file = one script — same reasoning |
+| Markdown / JSON / YAML | Data formats, not programming languages |
 
 ## License
 

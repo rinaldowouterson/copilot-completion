@@ -98,4 +98,10 @@ export interface NesCompletionItem extends vscode.InlineCompletionItem {
     isEditInAnotherDocument?: boolean;
     /** Default action command shown with the suggestion */
     command?: vscode.Command;
+    /**
+     * Phase H: extra edits (e.g. import insertion) that apply alongside
+     * the primary edit when the user accepts. Supported by the
+     * `inlineCompletionsAdditions` proposed API.
+     */
+    additionalTextEdits?: vscode.TextEdit[];
 }

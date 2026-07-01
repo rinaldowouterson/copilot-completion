@@ -175,6 +175,26 @@
           "default": "workspace",
           "description": "Symbol indexing scope: 'off' disables all LSP context; 'opened-files' queries only the file at cursor; 'workspace' (default) builds a full workspace symbol index for cross-file context."
         },
+        "cc-completion.context.autoImportEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Phase H: detect missing imports via LSP diagnostics and surface auto-import suggestions as NES inline completion items with additionalTextEdits."
+        },
+        "cc-completion.context.hoverEnrichmentEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Phase C: enrich import resolutions with hover-derived type signatures (vscode.executeHoverProvider)."
+        },
+        "cc-completion.context.typeHierarchyEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Phase G: query LSP type hierarchy for super-types of the enclosing class/interface (OOP languages)."
+        },
+        "cc-completion.context.lspNotifyEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Phase D: notify the user once per hour per language when no LSP is installed."
+        },
         "cc-completion.nes.contextScoping": {
           "type": "string",
           "enum": [

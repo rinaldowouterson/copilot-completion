@@ -24,33 +24,60 @@ export interface LanguageSyntax {
 /** A symbol exported or defined at top level in a file. */
 export interface FileExport {
     name: string;
-    kind: string; // 'Function' | 'Class' | 'Interface' | 'Variable' | 'Method' | ...
+    /** LSP `SymbolKind` name, e.g. 'Function' | 'Class' | 'Interface' | 'Variable' | 'Method'. */
+    kind: string;
+    /** 0-based line of the declaration. */
     line: number;
+    /**
+     * Optional hover-derived type signature. When present, formatters prefer
+     * `name:type` over `name:Kind` (Phase C).
+     */
+    type?: string;
 }
 
-/** A symbol used in the current file but not imported. */
+/** A symbol used in the current file but not yet imported. */
 export interface MissingImport {
     symbolName: string;
-    /** The module path the language server suggests for the import. */
+    /** The module path the language server suggests for the import (when known). */
     sourceModule?: string;
 }
 
 /**
  * An import statement resolved to its target file's exported symbols.
- * Produced by the LSP's document link provider — no regex, no AST.
+ *
+ * The `relativePath` field is **mandatory** — every import has a path. It
+ * is resolved during `ContextBuilderService.gather()` (not in the prompt
+ * formatters) so both GHOST and NES read the same canonical path.
+ *
+ * `typeSignatures` (optional) carries hover-derived signatures for the
+ * top exports of the imported file. When present, formatters prefer
+ * `name:type` over `name:Kind`.
  */
 export interface ImportResolution {
     /** The resolved absolute URI of the imported file (string form). */
     uri: string;
+    /**
+     * Workspace-relative path with leading `./` and file extension.
+     * Always present — resolved during `gather()`.
+     * Examples: "./Button.tsx", "../utils/helpers.ts", "./types/User.ts"
+     */
+    relativePath: string;
     /** Exported symbols from that file. */
     exports: FileExport[];
+    /**
+     * Optional hover-derived type signatures for the top exports.
+     * Keyed by `FileExport.name`. Formatters prefer `name:type` when present.
+     */
+    typeSignatures?: Record<string, string>;
 }
 
 /** The enclosing scope around the cursor position. */
 export interface EnclosingScope {
     kind: string;  // 'Function' | 'Class' | 'Interface' | 'Method' | ...
     name: string;
+    /** 0-based inclusive start line of the enclosing symbol. */
     startLine: number;
+    /** 0-based inclusive end line of the enclosing symbol. */
     endLine: number;
 }
 
@@ -67,8 +94,7 @@ export interface ContextBundle {
 
     /**
      * The line where the current statement/expression ends, as determined
-     * by the heuristic combined scan (semicolon → bracket-depth → 
-     * continuation-operator → indentation → 30-line budget cap).
+     * by the LSP SelectionRange provider (with heuristic fallback).
      * Used by NES to shrink the edit window, and by GHOST to optionally
      * trim the suffix.
      */
@@ -77,16 +103,28 @@ export interface ContextBundle {
     /** Top-level symbols exported by the current file. */
     fileExports: FileExport[];
 
-    /** Symbols referenced in the current file that are not yet imported. */
+    /**
+     * Symbols referenced in the current file that are not yet imported.
+     * Populated by the Phase H auto-import detection.
+     */
     missingImports: MissingImport[];
 
     /**
      * Resolved import targets with their exported symbols.
      * Each entry corresponds to one unique import statement in the current file,
-     * resolved via the LSP document link provider. Limited to the first 5 unique
-     * workspace-local imports to keep prompt size bounded.
+     * resolved via the LSP document link provider (with file-system fallback).
+     * Limited to the first 5 unique workspace-local imports to keep prompt
+     * size bounded.
      */
     importResolutions: ImportResolution[];
+
+    /**
+     * Phase G: Super-types of the enclosing class/interface (OOP languages).
+     * `undefined` for functional languages, languages without type hierarchy
+     * support, or when the cursor is not on a class/interface declaration.
+     * Capped at 5 super-types.
+     */
+    superTypes?: EnclosingScope[];
 
     /** The language ID (from VS Code). */
     languageId: string;
