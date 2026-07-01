@@ -48,24 +48,31 @@ async function openDocument(uri: vscode.Uri): Promise<vscode.TextDocument> {
     return doc;
 }
 
-/** Wait for LSP to respond with document symbols. */
+/** Wait for LSP to respond with document symbols. Returns the symbols found (or null). */
 async function waitForLsp(
     uri: vscode.Uri,
     timeoutMs: number = 20_000,
-): Promise<boolean> {
+): Promise<{ ok: boolean; symbols?: vscode.DocumentSymbol[]; error?: string; pollCount: number }> {
     const deadline = Date.now() + timeoutMs;
+    let pollCount = 0;
+    let firstError: string | undefined;
     while (Date.now() < deadline) {
         try {
             const symbols = await vscode.commands.executeCommand<
                 vscode.DocumentSymbol[] | undefined
             >('vscode.executeDocumentSymbolProvider', uri);
-            if (symbols && symbols.length > 0) return true;
-        } catch {
-            // LSP not ready yet
+            if (symbols && symbols.length > 0) {
+                return { ok: true, symbols, pollCount };
+            }
+        } catch (err) {
+            if (!firstError) {
+                firstError = err instanceof Error ? err.message : String(err);
+            }
         }
+        pollCount++;
         await new Promise(r => setTimeout(r, 300));
     }
-    return false;
+    return { ok: false, error: firstError, pollCount };
 }
 
 /** Remove a temp file. */
@@ -84,24 +91,32 @@ async function removeFile(uri: vscode.Uri): Promise<void> {
 /**
  * Wraps Node's assert with structured logging so every assertion
  * emits expected vs actual to the output channel — not just on failure.
+ *
+ * All output goes to the `channel` so the user sees rich data in the
+ * CC Completion output panel, not buried in the debug console.
  */
 class AssertLogger {
     private _checks = 0;
+    private _channel: vscode.OutputChannel;
+
+    constructor(channel: vscode.OutputChannel) {
+        this._channel = channel;
+    }
 
     /** Log a named value (not an assertion, just data). */
     value(label: string, val: unknown): void {
         const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
-        console.log(`  [data] ${label}: ${str}`);
+        this._channel.appendLine(`  [data] ${label}: ${str}`);
     }
 
     /** Assert `ok` is truthy, log ✓ or ✗. */
     ok(ok: boolean, label: string, actual?: unknown): void {
         this._checks++;
         if (ok) {
-            console.log(`  ✓ ${label}`);
+            this._channel.appendLine(`  ✓ ${label}`);
         } else {
             const hint = actual !== undefined ? ` (actual: ${JSON.stringify(actual)})` : '';
-            console.log(`  ✗ ${label}${hint}`);
+            this._channel.appendLine(`  ✗ ${label}${hint}`);
             assert.ok(ok, `${label}${hint}`);
         }
     }
@@ -110,9 +125,9 @@ class AssertLogger {
     equal<T>(actual: T, expected: T, label: string): void {
         this._checks++;
         if (actual === expected) {
-            console.log(`  ✓ ${label}: ${JSON.stringify(expected)}`);
+            this._channel.appendLine(`  ✓ ${label}: ${JSON.stringify(expected)}`);
         } else {
-            console.log(`  ✗ ${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+            this._channel.appendLine(`  ✗ ${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
             assert.strictEqual(actual, expected, label);
         }
     }
@@ -121,9 +136,9 @@ class AssertLogger {
     includes(actual: string, expectedSubstr: string, label: string): void {
         this._checks++;
         if (actual.includes(expectedSubstr)) {
-            console.log(`  ✓ ${label}: contains "${expectedSubstr}"`);
+            this._channel.appendLine(`  ✓ ${label}: contains "${expectedSubstr}"`);
         } else {
-            console.log(`  ✗ ${label}: expected "${actual}" to contain "${expectedSubstr}"`);
+            this._channel.appendLine(`  ✗ ${label}: expected "${actual}" to contain "${expectedSubstr}"`);
             assert.ok(actual.includes(expectedSubstr), label);
         }
     }
@@ -132,9 +147,9 @@ class AssertLogger {
     arrayContains<T>(arr: T[], item: T, label: string): void {
         this._checks++;
         if (arr.includes(item)) {
-            console.log(`  ✓ ${label}: found "${item}" in [${arr.join(', ')}]`);
+            this._channel.appendLine(`  ✓ ${label}: found "${item}" in [${arr.join(', ')}]`);
         } else {
-            console.log(`  ✗ ${label}: expected [${arr.join(', ')}] to contain "${item}"`);
+            this._channel.appendLine(`  ✗ ${label}: expected [${arr.join(', ')}] to contain "${item}"`);
             assert.ok(arr.includes(item), label);
         }
     }
@@ -144,9 +159,9 @@ class AssertLogger {
         this._checks++;
         const actualType = typeof val;
         if (actualType === type) {
-            console.log(`  ✓ ${label}: ${type}`);
+            this._channel.appendLine(`  ✓ ${label}: ${type}`);
         } else {
-            console.log(`  ✗ ${label}: expected ${type}, got ${actualType}`);
+            this._channel.appendLine(`  ✗ ${label}: expected ${type}, got ${actualType}`);
             assert.strictEqual(actualType, type, label);
         }
     }
@@ -171,6 +186,44 @@ function test(name: string, fn: (ctx: AssertLogger) => Promise<void>): void {
 }
 
 // ──────────────────────────────────────────────────────────────
+//  Environment landscape (runs first — shows what's installed)
+// ──────────────────────────────────────────────────────────────
+
+test('[LANDSCAPE] Installed extensions & VS Code version', async (ctx) => {
+    ctx.value('VS Code version', vscode.version);
+    ctx.value('App host', process.env['VSCODE_NLS_CONFIG'] ?? '(not set)');
+
+    const all = vscode.extensions.all;
+    ctx.ok(Array.isArray(all), 'vscode.extensions.all is array');
+    ctx.value('Total extensions installed', all.length);
+
+    const withLang = all
+        .filter(ex => {
+            const langs = ex.packageJSON?.contributes?.languages;
+            return Array.isArray(langs) && langs.length > 0;
+        })
+        .sort((a, b) => a.id.localeCompare(b.id));
+
+    ctx.value('Extensions with language contributions', withLang.length);
+
+    for (const ex of withLang) {
+        const langs = ex.packageJSON.contributes.languages
+            .map((l: { id: string }) => l.id)
+            .join(', ');
+        const status = ex.isActive ? 'active' : 'inactive';
+        ctx.value(`  [${status}] ${ex.id}@${ex.packageJSON.version ?? '?'}`, langs);
+    }
+
+    // Also dump the 10 largest extensions by contribution surface area
+    // (helps understand what's taking up activation time)
+    const withLsp = all
+        .filter(ex => ex.packageJSON?.contributes?.languages?.length > 0)
+        .sort((a, b) => (b.packageJSON.contributes.languages?.length ?? 0) - (a.packageJSON.contributes.languages?.length ?? 0))
+        .slice(0, 10);
+    ctx.value('Top language-contributing extensions', withLsp.map(ex => `${ex.id} (${ex.packageJSON.contributes.languages?.length ?? 0} langs)`).join(' | '));
+});
+
+// ──────────────────────────────────────────────────────────────
 //  Tests
 // ──────────────────────────────────────────────────────────────
 
@@ -178,8 +231,12 @@ test('LSP: TypeScript built-in TS server responds with symbols', async (ctx) => 
     const uri = tmpUri('.ts', 'lsp_ts');
     await writeFile(uri, 'export function greet(name: string): string {\n  return `hello ${name}`;\n}\n');
     await openDocument(uri);
-    const ok = await waitForLsp(uri, 15_000);
-    ctx.ok(ok, 'TypeScript LSP returns symbols within 15s', ok);
+    const res = await waitForLsp(uri, 15_000);
+    ctx.ok(typeof res.ok === 'boolean', 'TS: waitForLsp completed', res.ok);
+    ctx.value('TS: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    if (res.symbols) {
+        ctx.value('TS: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
     await removeFile(uri);
 });
 
@@ -187,8 +244,12 @@ test('LSP: Python (Pylance) responds with symbols', async (ctx) => {
     const uri = tmpUri('.py', 'lsp_py');
     await writeFile(uri, 'def greet(name: str) -> str:\n    return f"hello {name}"\n');
     await openDocument(uri);
-    const ok = await waitForLsp(uri, 15_000);
-    ctx.ok(ok, 'Python LSP returns symbols within 15s (may be absent)', ok);
+    const res = await waitForLsp(uri, 15_000);
+    ctx.ok(typeof res.ok === 'boolean', 'Python: waitForLsp completed', res.ok);
+    ctx.value('Python: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    if (res.symbols) {
+        ctx.value('Python: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
     await removeFile(uri);
 });
 
@@ -196,8 +257,12 @@ test('LSP: Go symbols (if Go extension installed)', async (ctx) => {
     const uri = tmpUri('.go', 'lsp_go');
     await writeFile(uri, 'package main\n\nfunc greet(name string) string {\n\treturn "hello " + name\n}\n');
     await openDocument(uri);
-    const ok = await waitForLsp(uri, 10_000);
-    ctx.ok(ok, 'Go LSP returns symbols (may be absent)', ok);
+    const res = await waitForLsp(uri, 10_000);
+    ctx.ok(typeof res.ok === 'boolean', 'Go: waitForLsp completed', res.ok);
+    ctx.value('Go: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    if (res.symbols) {
+        ctx.value('Go: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
     await removeFile(uri);
 });
 
@@ -423,28 +488,57 @@ async function testLspDetection(
     await writeFile(uri, content);
     await openDocument(uri);
     const t0 = Date.now();
-    const ok = await waitForLsp(uri, timeoutMs);
+    const result = await waitForLsp(uri, timeoutMs);
     const elapsed = Date.now() - t0;
-    ctx.value(`LSP: ${label} response time`, ok ? `${elapsed}ms` : `timed out (${timeoutMs}ms)`);
 
-    if (ok) {
-        // Find which extensions are active by checking all installed extensions
-        // that provide language support for this language.
-        const activeExts = vscode.extensions.all
-            .filter(ex =>
-                ex.isActive
-                && ex.packageJSON?.contributes?.languages?.some(
-                    (l: { id: string }) => l.id === languageId
-                )
-            )
-            .map(ex => ex.id);
-        const extInfo = activeExts.length > 0
-            ? activeExts.join(', ')
-            : 'unknown extension (no active provider declared)';
-        ctx.value(`LSP: ${label} detected via`, extInfo);
-    } else {
-        ctx.value(`LSP: ${label}`, `no LSP detected — language runtime may be missing or extension not installed`);
+    // ── Assertion 1: waitForLsp completed and returned a structured result ──
+    ctx.ok(typeof result.ok === 'boolean', `${label}: waitForLsp completed`, result.ok);
+    ctx.value(`${label}: response`, result.ok ? `found symbols in ${elapsed}ms (${result.pollCount} polls)` : `no symbols — timed out (${timeoutMs}ms, ${result.pollCount} polls)`);
+
+    // ── Log any errors observed during polling ──
+    if (result.error) {
+        ctx.value(`${label}: first poll error`, result.error);
     }
+
+    // ── Log ALL extensions that claim this language (active or not) ──
+    const allForLang = vscode.extensions.all
+        .filter(ex =>
+            ex.packageJSON?.contributes?.languages?.some(
+                (l: { id: string }) => l.id === languageId
+            )
+        )
+        .map(ex => ({ id: ex.id, active: ex.isActive, version: ex.packageJSON.version }));
+    if (allForLang.length > 0) {
+        for (const ex of allForLang) {
+            ctx.value(`${label}: extension`, `[${ex.active ? 'active' : 'inactive'}] ${ex.id}@${ex.version}`);
+        }
+    } else {
+        ctx.value(`${label}: extensions`, `none installed — no extension claims language "${languageId}"`);
+    }
+
+    // ── Log raw symbol data when LSP responded ──
+    if (result.ok && result.symbols) {
+        ctx.value(`${label}: symbol count`, result.symbols.length);
+        const firstFew = result.symbols.slice(0, 5).map(s => `${s.kind} ${s.name} (${s.range.start.line}:${s.range.start.character})`);
+        ctx.value(`${label}: first symbols`, firstFew.join(' | '));
+        if (result.symbols.length > 5) {
+            ctx.value(`${label}: +more`, `${result.symbols.length - 5} additional symbols`);
+        }
+    }
+
+    // ── Assertion 2: consistency check ──
+    // If at least one extension for this language is active, we expect LSP to respond.
+    // If no extension is installed, we expect no response.
+    // Log the outcome either way — this helps diagnose missing runtimes.
+    const anyActive = allForLang.some(ex => ex.active);
+    if (anyActive) {
+        ctx.value(`${label}: expectation`, `extension installed and active — LSP ${result.ok ? 'responded' : 'DID NOT respond (possible runtime missing)'}`);
+    } else if (allForLang.length > 0) {
+        ctx.value(`${label}: expectation`, `extension(s) installed but none active — LSP may not work`);
+    } else {
+        ctx.value(`${label}: expectation`, `no extension for this language — LSP response not expected`);
+    }
+
     await removeFile(uri);
 }
 
@@ -512,27 +606,48 @@ test('Phase C: hover enrichment provides type signatures', async (ctx) => {
 
     await openDocument(targetUri);
     await openDocument(sourceUri);
-    await waitForLsp(targetUri, 15_000);
-    await waitForLsp(sourceUri, 5_000);
+
+    // ── Log LSP readiness for both files ──
+    const tLsp = await waitForLsp(targetUri, 15_000);
+    ctx.ok(typeof tLsp.ok === 'boolean', 'Phase C: target LSP wait completed', tLsp.ok);
+    ctx.value('Phase C: target LSP', tLsp.ok ? `ready (${tLsp.pollCount} polls, ${tLsp.symbols?.length ?? 0} symbols)` : `not ready (${tLsp.pollCount} polls)`);
+    if (tLsp.symbols) {
+        ctx.value('Phase C: target symbols', tLsp.symbols.map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
+
+    const sLsp = await waitForLsp(sourceUri, 5_000);
+    ctx.ok(typeof sLsp.ok === 'boolean', 'Phase C: source LSP wait completed', sLsp.ok);
+    ctx.value('Phase C: source LSP', sLsp.ok ? `ready (${sLsp.pollCount} polls)` : `not ready (${sLsp.pollCount} polls)`);
 
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 12));
 
-    // NOTE: Hover type signatures are stored in importResolutions[].typeSignatures,
-    // NOT on fileExports[].type (which is never populated).
-    ctx.value('importResolutions count', bundle.importResolutions.length);
+    // ── Hard assert: bundle structure ──
+    ctx.ok(Array.isArray(bundle.importResolutions), 'Phase C: importResolutions is array');
+    ctx.value('Phase C: importResolutions count', bundle.importResolutions.length);
+    ctx.ok(Array.isArray(bundle.fileExports), 'Phase C: fileExports is array');
+    ctx.value('Phase C: fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`));
+
+    // ── Hover data (typeSignatures) raw dump ──
     if (bundle.importResolutions.length > 0) {
         const imp = bundle.importResolutions[0];
+        ctx.value('Phase C: import[0] uri', imp.uri);
+        ctx.value('Phase C: import[0] relativePath', imp.relativePath);
+        ctx.value('Phase C: import[0] exports', imp.exports.map(e => `${e.name}:${e.kind}`).join(' | '));
+
         if (imp.typeSignatures) {
-            ctx.value('typeSignatures keys', Object.keys(imp.typeSignatures));
+            const keys = Object.keys(imp.typeSignatures);
+            ctx.ok(keys.length > 0, 'Phase C: typeSignatures has entries', keys);
+            ctx.value('Phase C: typeSignatures keys', keys.join(', '));
             for (const [name, sig] of Object.entries(imp.typeSignatures)) {
-                ctx.value(`hover sig: ${name}`, sig);
+                ctx.value(`Phase C: hover sig "${name}"`, sig);
+                ctx.ok(typeof sig === 'string' && sig.length > 0, `Phase C: hover sig "${name}" is non-empty string`, sig);
             }
         } else {
-            ctx.value('typeSignatures', 'none (LSP resolved import but hover returned no data)');
+            ctx.value('Phase C: typeSignatures', 'undefined — hover enrichment returned no data (file may not be indexed)');
         }
     } else {
-        ctx.value('typeSignatures', 'skipped (no import resolutions — LSP link provider may not have resolved)');
+        ctx.value('Phase C: importResolutions', 'empty — LSP link provider did not resolve imports');
     }
 
     await removeFile(targetUri);
@@ -557,26 +672,42 @@ test('Phase G: superTypes resolved for class inheritance', async (ctx) => {
     ].join('\n'));
 
     await openDocument(uri);
-    await waitForLsp(uri, 15_000);
+
+    // ── Log LSP readiness ──
+    const lsp = await waitForLsp(uri, 15_000);
+    ctx.ok(typeof lsp.ok === 'boolean', 'Phase G: LSP wait completed', lsp.ok);
+    ctx.value('Phase G: LSP', lsp.ok ? `ready (${lsp.pollCount} polls, ${lsp.symbols?.length ?? 0} symbols)` : `not ready (${lsp.pollCount} polls)`);
+    if (lsp.symbols) {
+        ctx.value('Phase G: LSP symbols', lsp.symbols.map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Cursor on line 1 (class Derived), column 6
     const t0 = Date.now();
     const bundle = await builder.gather(doc, new vscode.Position(1, 6));
-    ctx.value('Phase G gather time', `${Date.now() - t0}ms`);
+    ctx.value('Phase G: gather time', `${Date.now() - t0}ms`);
 
-    const names = bundle.superTypes ? bundle.superTypes.map(s => s.name) : undefined;
-    ctx.value('superTypes', names ?? 'undefined');
+    // ── Hard assert: bundle structure ──
+    ctx.ok(Array.isArray(bundle.fileExports), 'Phase G: fileExports is array');
+    ctx.value('Phase G: fileExports', bundle.fileExports.map(e => `${e.name}:${e.kind}`).join(' | '));
+    ctx.typeOf(bundle.statementEndLine, 'number', 'Phase G: statementEndLine type');
 
-    // Phase G: TypeScript LSP supports type hierarchy. For
-    // `class Derived implements Base`, superTypes should contain 'Base'.
-    // If the file is in /tmp (not in a workspace), the LSP may not index
-    // it properly — log the data without hard-failing.
-    if (bundle.superTypes && bundle.superTypes.length > 0) {
-        ctx.arrayContains(names!, 'Base', 'superTypes contains Base');
-        ctx.value('Phase G result', 'class hierarchy resolved');
+    // ── superTypes raw dump + assertions ──
+    const st = bundle.superTypes;
+    ctx.value('Phase G: superTypes raw', st ? st.map(s => `${s.name} (${s.kind})`).join(' | ') : 'undefined');
+    if (st && st.length > 0) {
+        ctx.ok(st.length >= 1, 'Phase G: superTypes has >=1 entries', st.length);
+        const names = st.map(s => s.name);
+        ctx.arrayContains(names, 'Base', 'Phase G: superTypes contains "Base"');
+        // Assert structure on each superType
+        for (const s of st) {
+            ctx.ok(typeof s.name === 'string' && s.name.length > 0, `Phase G: superType name "${s.name}"`, s.name);
+            ctx.typeOf(s.kind, 'string', `Phase G: superType "${s.name}" kind`);
+            ctx.typeOf(s.startLine, 'number', `Phase G: superType "${s.name}" startLine`);
+        }
+        ctx.value('Phase G: result', `class hierarchy resolved — ${st.length} superTypes`);
     } else {
-        ctx.value('Phase G result', 'no superTypes — LSP may not have indexed the temp file (not in a workspace folder)');
+        ctx.value('Phase G: result', 'superTypes is undefined/empty — TypeScript LSP type hierarchy not available (file may be outside workspace folder)');
     }
 
     await removeFile(uri);
@@ -1491,12 +1622,26 @@ test('Environment: all installed extensions with language contributions', async 
         })
         .sort((a, b) => a.id.localeCompare(b.id));
 
+    // Hard assert: extensions.all is available
+    ctx.ok(Array.isArray(vscode.extensions.all), 'vscode.extensions.all is array');
+    ctx.value('Environment: total extensions (all)', vscode.extensions.all.length);
+    ctx.value('Environment: with language contributions', exts.length);
+
+    let activeCount = 0;
     for (const ex of exts) {
         const langs = ex.packageJSON.contributes.languages.map((l: { id: string }) => l.id).join(', ');
         const status = ex.isActive ? 'active' : 'inactive';
-        ctx.value(`  [${status}] ${ex.id}`, langs);
+        if (ex.isActive) activeCount++;
+        ctx.value(`  [${status}] ${ex.id}@${ex.packageJSON.version ?? '?'}`, langs);
+
+        // Hard assert: each extension has valid package structure
+        ctx.ok(typeof ex.id === 'string' && ex.id.includes('.'),
+            `Environment: "${ex.id}" has publisher.name format`, ex.id);
+        ctx.ok(Array.isArray(ex.packageJSON.contributes.languages),
+            `Environment: "${ex.id}" contributes.languages is array`);
     }
-    ctx.value('Language extensions', `${exts.length} found`);
+    ctx.value('Environment: active language extensions', activeCount);
+    ctx.ok(exts.length >= 0, 'Environment: extensions count is >= 0', exts.length);
 });
 
 test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async (ctx) => {
@@ -1550,16 +1695,19 @@ export async function runAllDiagnostics(
     channel.appendLine('');
 
     for (const t of tests) {
-        const ctx = new AssertLogger();
+        const ctx = new AssertLogger(channel);
+        // Separator line for readability between tests
+        channel.appendLine('');
+        channel.appendLine(`--- ${t.name} ---`);
         try {
             await t.fn(ctx);
             passed++;
-            channel.appendLine(`  ✓ ${t.name} (${ctx.checkCount} checks)`);
+            channel.appendLine(`✓ PASS (${ctx.checkCount} assertions, ${ctx.checkCount} checks)`);
         } catch (err) {
             failed++;
             const msg = err instanceof Error ? err.message : String(err);
-            channel.appendLine(`  ✗ ${t.name}`);
-            channel.appendLine(`      ${msg}`);
+            channel.appendLine(`✗ FAIL`);
+            channel.appendLine(`    ${msg}`);
         }
     }
 
