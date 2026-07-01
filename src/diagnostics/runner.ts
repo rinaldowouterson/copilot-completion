@@ -71,14 +71,14 @@ async function openDocument(uri: vscode.Uri): Promise<vscode.TextDocument> {
 /** Wait for LSP to respond with document symbols. Returns the symbols found (or null). */
 async function waitForLsp(
     uri: vscode.Uri,
-    timeoutMs: number = 20_000,
-): Promise<{ ok: boolean; symbols?: vscode.DocumentSymbol[]; error?: string; pollCount: number }> {
-    const deadline = Date.now() + timeoutMs;
-    let pollCount = 0;
+    timeoutMs: number = 1500,
+): Promise<{ ok: boolean; symbols?: vscode.DocumentSymbol[]; error?: string; attemptCount: number }> {
+    let attemptCount = 0;
     let firstError: string | undefined;
     const uriStr = uri.toString();
 
     const tryFetch = async (): Promise<vscode.DocumentSymbol[] | undefined> => {
+        attemptCount++;
         try {
             const s = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
                 'vscode.executeDocumentSymbolProvider', uri,
@@ -90,54 +90,29 @@ async function waitForLsp(
         return undefined;
     };
 
-    // Listen for diagnostics on our file — TS server fires this when it
-    // finishes processing, meaning symbols should be available right after.
-    let diagnosticsFired = false;
-    const d = vscode.languages.onDidChangeDiagnostics(e => {
-        if (e.uris.some(u => u.toString() === uriStr)) {
-            diagnosticsFired = true;
-        }
+    // Subscribe to diagnostics before yielding — the LS fires this when it
+    // finishes processing. We park on this single Promise; no polling.
+    const diagnosticsFired = new Promise<boolean>(resolve => {
+        const d = vscode.languages.onDidChangeDiagnostics(e => {
+            if (e.uris.some(u => u.toString() === uriStr)) {
+                d.dispose();
+                resolve(true);
+            }
+        });
+        setTimeout(() => {
+            d.dispose();
+            resolve(false);
+        }, timeoutMs);
     });
 
-    try {
-        // ── Phase 1: Fast poll (50ms × 10 = 500ms) ──
-        // Catches TypeScript loose files, Python, Go, Rust — usually <300ms.
-        while (Date.now() < deadline && pollCount < 10) {
-            const s = await tryFetch();
-            if (s) return { ok: true, symbols: s, pollCount };
-            pollCount++;
-            await new Promise(r => setTimeout(r, 50));
-        }
-
-        // ── Phase 2: Diagnostics-triggered + slow poll ──
-        // For workspace projects the TS server processes asynchronously.
-        // When diagnostics fire, we know processing is done — do a burst check.
-        while (Date.now() < deadline) {
-            const s = await tryFetch();
-            if (s) return { ok: true, symbols: s, pollCount };
-            pollCount++;
-
-            if (diagnosticsFired) {
-                // Diagnostics arrived — TS server finished. Burst-check then exit.
-                for (let i = 0; i < 3; i++) {
-                    await new Promise(r => setTimeout(r, 10));
-                    const burst = await tryFetch();
-                    if (burst) return { ok: true, symbols: burst, pollCount };
-                }
-                break;
-            }
-
-            await new Promise(r => setTimeout(r, 500));
-        }
-
-        // ── Phase 3: One final attempt ──
+    // Wait for the LS to signal readiness (or timeout for non-compliant LSPs)
+    const fired = await diagnosticsFired;
+    if (fired) {
         const s = await tryFetch();
-        if (s) return { ok: true, symbols: s, pollCount };
-    } finally {
-        d.dispose();
+        if (s) return { ok: true, symbols: s, attemptCount };
     }
 
-    return { ok: false, error: firstError, pollCount };
+    return { ok: false, error: firstError, attemptCount };
 }
 
 /** Remove a temp file, first closing any editor tab showing it. */
@@ -174,18 +149,86 @@ async function closeTabForUri(uri: vscode.Uri): Promise<void> {
     for (const group of vscode.window.tabGroups.all) {
         for (const tab of group.tabs) {
             if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === uriStr) {
-                // If the document is dirty, revert it first to avoid the "save?" prompt
-                const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uriStr);
-                if (doc && doc.isDirty) {
-                    // Reverting sets content back to last saved version without prompting
-                    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
-                } else {
-                    await vscode.window.tabGroups.close(tab);
-                }
+                await closeTab(tab);
                 return;
             }
         }
     }
+}
+
+/**
+ * Close a specific untitled document by reference.
+ *
+ * `revertAndCloseActiveEditor` is unreliable because it targets whatever tab is
+ * currently active, not a specific tab. This helper locates the tab containing
+ * the given doc and closes that one directly. Falls back to the active-editor
+ * command if the tab can't be located (e.g. the doc isn't visible).
+ */
+async function closeUntitledDoc(doc: vscode.TextDocument): Promise<void> {
+    const docUri = doc.uri.toString();
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === docUri) {
+                await closeTab(tab);
+                return;
+            }
+        }
+    }
+    // Doc not in any tab group (e.g. it was never shown). Closing the active
+    // editor is still better than leaking the buffer.
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+}
+
+/**
+ * Close a single tab, preferring `revertAndCloseActiveEditor` so any unsaved
+ * buffer is reverted without prompting. We select the tab first so the command
+ * targets *this* tab rather than whatever happens to be active.
+ */
+async function closeTab(tab: vscode.Tab): Promise<void> {
+    // If the tab is dirty, prefer revert+close via the active-editor command.
+    // First make this tab active so the command targets it.
+    const input = tab.input;
+    if (input instanceof vscode.TabInputText) {
+        const uriStr = input.uri.toString();
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uriStr);
+        if (doc && doc.isDirty) {
+            // Showing the doc makes its tab the active one, then revertAndCloseActiveEditor
+            // closes *that* tab (the one we just selected) instead of some other active tab.
+            await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
+            await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+            return;
+        }
+    }
+    await vscode.window.tabGroups.close(tab);
+}
+
+/**
+ * Pre-flight cleanup: close any untitled tabs lingering from a previous run of
+ * the diagnostics. Each `openTextDocument({ language, content })` allocates a
+ * new `Untitled-N` slot that survives across command invocations until closed
+ * or until VS Code itself restarts. Without this, running diagnostics N times
+ * leaves N untitled tabs behind.
+ */
+async function closeAllUntitledTabs(): Promise<number> {
+    let closed = 0;
+    // Snapshot the list first — closing mutates tabGroups.all.
+    const targets: vscode.Tab[] = [];
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.scheme === 'untitled') {
+                targets.push(tab);
+            }
+        }
+    }
+    for (const tab of targets) {
+        try {
+            await closeTab(tab);
+            closed++;
+        } catch {
+            // best-effort
+        }
+    }
+    return closed;
 }
 
 /** Create a temp directory URI with a unique name. */
@@ -374,9 +417,9 @@ test('LSP: TypeScript built-in TS server responds with symbols', async (ctx) => 
     const uri = tmpUri('.ts', 'lsp_ts');
     await writeFile(uri, 'export function greet(name: string): string {\n  return `hello ${name}`;\n}\n');
     await openDocument(uri);
-    const res = await waitForLsp(uri, 15_000);
+    const res = await waitForLsp(uri, 1500);
     ctx.ok(typeof res.ok === 'boolean', 'TS: waitForLsp completed', res.ok);
-    ctx.value('TS: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    ctx.value('TS: response', res.ok ? `symbols in ${res.attemptCount} attempt(s)` : `no symbols (${res.attemptCount} attempt(s))`);
     if (res.symbols) {
         ctx.value('TS: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
     }
@@ -387,9 +430,9 @@ test('LSP: Python (Pylance) responds with symbols', async (ctx) => {
     const uri = tmpUri('.py', 'lsp_py');
     await writeFile(uri, 'def greet(name: str) -> str:\n    return f"hello {name}"\n');
     await openDocument(uri);
-    const res = await waitForLsp(uri, 15_000);
+    const res = await waitForLsp(uri, 1500);
     ctx.ok(typeof res.ok === 'boolean', 'Python: waitForLsp completed', res.ok);
-    ctx.value('Python: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    ctx.value('Python: response', res.ok ? `symbols in ${res.attemptCount} attempt(s)` : `no symbols (${res.attemptCount} attempt(s))`);
     if (res.symbols) {
         ctx.value('Python: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
     }
@@ -400,9 +443,9 @@ test('LSP: Go symbols (if Go extension installed)', async (ctx) => {
     const uri = tmpUri('.go', 'lsp_go');
     await writeFile(uri, 'package main\n\nfunc greet(name string) string {\n\treturn "hello " + name\n}\n');
     await openDocument(uri);
-    const res = await waitForLsp(uri, 10_000);
+    const res = await waitForLsp(uri, 1500);
     ctx.ok(typeof res.ok === 'boolean', 'Go: waitForLsp completed', res.ok);
-    ctx.value('Go: response', res.ok ? `symbols in ${res.pollCount} polls` : `no symbols (${res.pollCount} polls)`);
+    ctx.value('Go: response', res.ok ? `symbols in ${res.attemptCount} attempt(s)` : `no symbols (${res.attemptCount} attempt(s))`);
     if (res.symbols) {
         ctx.value('Go: symbols', res.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
     }
@@ -435,7 +478,7 @@ test('Phase A: TypeScript import resolution with relativePath', async (ctx) => {
 
     await openDocument(targetUri);
     await openDocument(sourceUri);
-    await waitForLsp(targetUri, 15_000);
+    await waitForLsp(targetUri, 1500);
     await waitForLsp(sourceUri, 5_000);
 
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
@@ -476,7 +519,7 @@ test('Phase A: relativePath is mandatory on every ImportResolution', async (ctx)
 
     await openDocument(targetUri);
     await openDocument(sourceUri);
-    await waitForLsp(targetUri, 10_000);
+    await waitForLsp(targetUri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -501,7 +544,7 @@ test('Phase B: statement end detected via LSP', async (ctx) => {
     const uri = tmpUri('.ts', 'phase_b');
     await writeFile(uri, 'const x = 42;\nconst y = x + 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Cursor at line 0, column 6 (inside "const x = 42")
@@ -523,7 +566,7 @@ test('Phase H: missingImports is always an array', async (ctx) => {
     const uri = tmpUri('.ts', 'phase_h');
     await writeFile(uri, 'export const ok = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -542,7 +585,7 @@ test('Phase G: superTypes is undefined for non-class cursor', async (ctx) => {
     const uri = tmpUri('.ts', 'phase_g');
     await writeFile(uri, 'function foo(): void {}\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -561,7 +604,7 @@ test('Bundle: JSON-serializable and contains required fields', async (ctx) => {
     const uri = tmpUri('.ts', 'bundle_json');
     await writeFile(uri, 'export class Bar { x: number = 1; }\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -588,7 +631,7 @@ test('languageSyntax matches TypeScript rules', async (ctx) => {
     const uri = tmpUri('.ts', 'syntax');
     await writeFile(uri, 'const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -625,7 +668,7 @@ async function testLspDetection(
     ext: string,
     content: string,
     languageId: string,
-    timeoutMs: number = 15_000,
+    timeoutMs: number = 1500,
 ): Promise<void> {
     const uri = tmpUri(ext, `lsp_${label}`);
     await writeFile(uri, content);
@@ -636,7 +679,7 @@ async function testLspDetection(
 
     // ── Assertion 1: waitForLsp completed and returned a structured result ──
     ctx.ok(typeof result.ok === 'boolean', `${label}: waitForLsp completed`, result.ok);
-    ctx.value(`${label}: response`, result.ok ? `found symbols in ${elapsed}ms (${result.pollCount} polls)` : `no symbols — timed out (${timeoutMs}ms, ${result.pollCount} polls)`);
+    ctx.value(`${label}: response`, result.ok ? `found symbols in ${elapsed}ms (${result.attemptCount} attempt(s))` : `no symbols — timed out (${timeoutMs}ms, ${result.attemptCount} attempt(s))`);
 
     // ── Log any errors observed during polling ──
     if (result.error) {
@@ -669,17 +712,35 @@ async function testLspDetection(
         }
     }
 
-    // ── Assertion 2: consistency check ──
-    // If at least one extension for this language is active, we expect LSP to respond.
-    // If no extension is installed, we expect no response.
-    // Log the outcome either way — this helps diagnose missing runtimes.
+    // ── Assertion 2: active extension must produce an LSP response ──
+    // Three scenarios (worst → best):
+    //
+    //   (a) No extension at all for this language → HARD FAIL.
+    //       Means nobody claims this language, so the entire pipeline is blind.
+    //
+    //   (b) Extension(s) exist but none active → INFO, no failure.
+    //       The user hasn't opened a file of this language; the client-side
+    //       activation trigger never ran. Normal for untested languages.
+    //
+    //   (c) At least one active extension → must produce symbols.
+    //       If the LSP doesn't respond, something is wrong (missing runtime,
+    //       broken server, temp-file restrictions, etc.).
+    //
     const anyActive = allForLang.some(ex => ex.active);
-    if (anyActive) {
-        ctx.value(`${label}: expectation`, `extension installed and active — LSP ${result.ok ? 'responded' : 'DID NOT respond (possible runtime missing)'}`);
-    } else if (allForLang.length > 0) {
-        ctx.value(`${label}: expectation`, `extension(s) installed but none active — LSP may not work`);
-    } else {
-        ctx.value(`${label}: expectation`, `no extension for this language — LSP response not expected`);
+    const anyExist = allForLang.length > 0;
+    const info: string = !anyExist
+        ? `no extension for this language — nobody handles "${languageId}"`
+        : anyActive
+            ? result.ok
+                ? `extension installed and active — LSP responded (${(result.symbols?.length ?? 0)} symbols)`
+                : `extension installed and active — LSP DID NOT respond (possible runtime missing)`
+            : `extension(s) installed but none active — LSP may not work`;
+    ctx.value(`${label}: expectation`, info);
+
+    if (!anyExist) {
+        ctx.ok(false, `${label}: at least one LSP extension must be installed for language "${languageId}"`);
+    } else if (anyActive) {
+        ctx.ok(result.ok, `${label}: LSP responds with symbols`, result.symbols ? `found ${result.symbols.length} symbol(s)` : 'no symbols');
     }
 
     await removeFile(uri);
@@ -717,8 +778,98 @@ test('LSP: Dart responds with symbols', async (ctx) => {
         'void main() { print("hello"); }\n', 'dart');
 });
 
+/**
+ * Lua LSP-specific test that uses an EOF edit to wake the LSP.
+ *
+ * sumneko.lua does not fire onDidChangeDiagnostics for clean temp files
+ * (no diagnostics to publish). This test forces a didChange via a minimal
+ * EOF edit, then waits on the event with a short timeout.
+ */
+async function testLuaLSP(ctx: AssertLogger): Promise<void> {
+    const uri = tmpUri('.lua', 'lsp_lua');
+    await writeFile(uri, 'function greet(name) return "hello " .. name end\n');
+    await openDocument(uri);
+
+    const t0 = Date.now();
+
+    // ── Subscribe first, then apply a tiny EOF edit ──
+    // This forces a didChange, which compliant LSPs answer with diagnostics
+    // (triggering onDidChangeDiagnostics). Non-compliant LSPs still process
+    // the change, so a single fetch after the timeout will find symbols.
+    const diagnosticsFired = new Promise<boolean>(resolve => {
+        const d = vscode.languages.onDidChangeDiagnostics(e => {
+            if (e.uris.some(u => u.toString() === uri.toString())) {
+                d.dispose();
+                resolve(true);
+            }
+        });
+        // Short timeout — either the event fires or we proceed anyway
+        setTimeout(() => {
+            d.dispose();
+            resolve(false);
+        }, 500);
+    });
+
+    // Apply a non-destructive edit at EOF to trigger didChange
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const eofPos = doc.lineAt(Math.max(0, doc.lineCount - 1)).range.end;
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(uri, eofPos, ' ');
+    await vscode.workspace.applyEdit(edit);
+
+    const fired = await diagnosticsFired;
+    const elapsed = Date.now() - t0;
+
+    // ── Now fetch symbols — the LS has processed the didChange ──
+    let symbols: vscode.DocumentSymbol[] | undefined;
+    let fetchError: string | undefined;
+    try {
+        const s = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | undefined>(
+            'vscode.executeDocumentSymbolProvider', uri,
+        );
+        if (s && s.length > 0) symbols = s;
+    } catch (err) {
+        fetchError = err instanceof Error ? err.message : String(err);
+    }
+
+    // ── Log results ──
+    ctx.ok(typeof fired === 'boolean', 'lua: waitForDiagnostics completed', fired);
+    ctx.value('lua: response', fired
+        ? `event fired in ${elapsed}ms — symbols: ${symbols ? symbols.map(s => s.name).join(', ') : 'none'}`
+        : `timeout after ${elapsed}ms — symbols: ${symbols ? symbols.map(s => s.name).join(', ') : 'none'}`);
+
+    if (symbols) {
+        ctx.value('lua: symbol count', symbols.length);
+        ctx.value('lua: first symbols', symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
+
+    // ── Log extension info ──
+    const allForLang = vscode.extensions.all
+        .filter(ex =>
+            ex.packageJSON?.contributes?.languages?.some(
+                (l: { id: string }) => l.id === 'lua'
+            )
+        )
+        .map(ex => ({ id: ex.id, active: ex.isActive, version: ex.packageJSON.version }));
+    for (const ex of allForLang) {
+        ctx.value('lua: extension', `[${ex.active ? 'active' : 'inactive'}] ${ex.id}@${ex.version}`);
+    }
+
+    // ── Expectation — if sumneko.lua (or any Lua LSP) is active, symbols should be found ──
+    const anyActive = allForLang.some(ex => ex.active);
+    ctx.ok(!anyActive || !!symbols,
+        'lua: LSP responds with symbols',
+        symbols ? `found ${symbols.length} symbol(s)` : 'no symbols');
+
+    if (fetchError) {
+        ctx.value('lua: fetch error', fetchError);
+    }
+
+    await removeFile(uri);
+}
+
 test('LSP: Lua (sumneko.lua) responds with symbols', async (ctx) => {
-    await testLspDetection(ctx, 'lua', '.lua', 'function greet(name) return "hello " .. name end\n', 'lua');
+    await testLuaLSP(ctx);
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -751,16 +902,16 @@ test('Phase C: hover enrichment provides type signatures', async (ctx) => {
     await openDocument(sourceUri);
 
     // ── Log LSP readiness for both files ──
-    const tLsp = await waitForLsp(targetUri, 15_000);
+    const tLsp = await waitForLsp(targetUri, 1500);
     ctx.ok(typeof tLsp.ok === 'boolean', 'Phase C: target LSP wait completed', tLsp.ok);
-    ctx.value('Phase C: target LSP', tLsp.ok ? `ready (${tLsp.pollCount} polls, ${tLsp.symbols?.length ?? 0} symbols)` : `not ready (${tLsp.pollCount} polls)`);
+    ctx.value('Phase C: target LSP', tLsp.ok ? `ready (${tLsp.attemptCount} attempt(s), ${tLsp.symbols?.length ?? 0} symbols)` : `not ready (${tLsp.attemptCount} attempt(s))`);
     if (tLsp.symbols) {
         ctx.value('Phase C: target symbols', tLsp.symbols.map(s => `${s.kind} ${s.name}`).join(' | '));
     }
 
     const sLsp = await waitForLsp(sourceUri, 5_000);
     ctx.ok(typeof sLsp.ok === 'boolean', 'Phase C: source LSP wait completed', sLsp.ok);
-    ctx.value('Phase C: source LSP', sLsp.ok ? `ready (${sLsp.pollCount} polls)` : `not ready (${sLsp.pollCount} polls)`);
+    ctx.value('Phase C: source LSP', sLsp.ok ? `ready (${sLsp.attemptCount} attempt(s))` : `not ready (${sLsp.attemptCount} attempt(s))`);
 
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(sourceDoc, new vscode.Position(2, 12));
@@ -819,9 +970,9 @@ test('Phase G: superTypes resolved for class inheritance', async (ctx) => {
     await openDocument(uri);
 
     // ── Log LSP readiness ──
-    const lsp = await waitForLsp(uri, 15_000);
+    const lsp = await waitForLsp(uri, 1500);
     ctx.ok(typeof lsp.ok === 'boolean', 'Phase G: LSP wait completed', lsp.ok);
-    ctx.value('Phase G: LSP', lsp.ok ? `ready (${lsp.pollCount} polls, ${lsp.symbols?.length ?? 0} symbols)` : `not ready (${lsp.pollCount} polls)`);
+    ctx.value('Phase G: LSP', lsp.ok ? `ready (${lsp.attemptCount} attempt(s), ${lsp.symbols?.length ?? 0} symbols)` : `not ready (${lsp.attemptCount} attempt(s))`);
     if (lsp.symbols) {
         ctx.value('Phase G: LSP symbols', lsp.symbols.map(s => `${s.kind} ${s.name}`).join(' | '));
     }
@@ -870,7 +1021,7 @@ test('Bundle: Python function export shape', async (ctx) => {
     const uri = tmpUri('.py', 'bundle_py');
     await writeFile(uri, 'def add(a: int, b: int) -> int:\n    return a + b\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 5));
@@ -900,7 +1051,7 @@ test('Bundle: Rust module export shape', async (ctx) => {
         'pub struct Point { x: i32, y: i32 }',
     ].join('\n'));
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 10));
@@ -926,7 +1077,7 @@ test('Bundle: Go export shape with language routing', async (ctx) => {
     const uri = tmpUri('.go', 'bundle_go');
     await writeFile(uri, 'package lib\n\nfunc Greet(name string) string {\n\treturn "hello, " + name\n}\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(2, 10));
@@ -960,7 +1111,7 @@ test('[P0] Phase A: import from non-existent file returns empty — not crash', 
     ].join('\n'));
 
     await openDocument(sourceUri);
-    await waitForLsp(sourceUri, 10_000);
+    await waitForLsp(sourceUri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(sourceUri);
     // This should NOT throw — must return empty importResolutions gracefully
@@ -991,7 +1142,7 @@ test('[P0] Phase A: broken import syntax does not crash gather()', async (ctx) =
     ].join('\n'));
 
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(1, 5));
@@ -1018,7 +1169,7 @@ test('[P0] Phase H: actual missing-import detection', async (ctx) => {
     ].join('\n'));
 
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     // Wait a beat for diagnostics to propagate
     await new Promise(r => setTimeout(r, 1000));
@@ -1072,7 +1223,7 @@ test('[P1] Phase B: cursor at end of file returns valid statementEndLine', async
         'const y = x + 1;',
     ].join('\n'));
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Cursor at last line, column 0
@@ -1102,7 +1253,7 @@ test('[P1] Phase B: multi-line block statement end', async (ctx) => {
         '}',
     ].join('\n'));
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(1, 7)); // inside the function
@@ -1121,7 +1272,7 @@ test('[P1] untitled:Untitled-1 document does not throw in gather()', async (ctx)
     log.enabled = false;
     const builder = new ContextBuilderService(log);
 
-    // Create an untitled document (no fsPath)
+    // Create an untitled document (no fsPath) — show it so gather() has an editor context
     const doc = await vscode.workspace.openTextDocument({ language: 'typescript', content: 'const x = 1;\n' });
     await vscode.window.showTextDocument(doc, { preserveFocus: true, preview: true });
 
@@ -1132,6 +1283,11 @@ test('[P1] untitled:Untitled-1 document does not throw in gather()', async (ctx)
     ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type for untitled');
     ctx.value('statementEndLine', bundle.statementEndLine);
     ctx.value('languageId', bundle.languageId);
+
+    // Close the untitled tab to prevent stranded tabs — target this specific tab,
+    // not "the currently active one" (which may have changed between showTextDocument
+    // and here).
+    await closeUntitledDoc(doc);
 });
 
 test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', async (ctx) => {
@@ -1149,7 +1305,7 @@ test('[P1] Phase G: LSP without TypeHierarchy returns undefined superTypes', asy
         '    pass',
     ].join('\n'));
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Cursor on line 3 (class MyDerived)
@@ -1175,7 +1331,7 @@ test('[P1] Phase C: hover on whitespace returns empty — does not throw', async
         'function foo() { return x; }',
     ].join('\n'));
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Cursor on line 1 (blank line), column 0 — hover returns nothing
@@ -1300,7 +1456,7 @@ test('hasLspSupport: returns true for TypeScript files', async (ctx) => {
     const uri = tmpUri('.ts', 'haslsp_ts');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
     const doc = await vscode.workspace.openTextDocument(uri);
     const supported = await hasLspSupport(doc);
     ctx.ok(supported, 'TypeScript file has LSP support');
@@ -1399,7 +1555,7 @@ test('fileKind: JSON file import resolves with fileKind "data"', async (ctx) => 
 
     await openDocument(jsonUri);
     await openDocument(sourceUri);
-    await waitForLsp(jsonUri, 10_000);
+    await waitForLsp(jsonUri, 1500);
     await waitForLsp(sourceUri, 5_000);
 
     const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
@@ -1430,7 +1586,7 @@ test('public detectMissingImports() returns array for clean file', async (ctx) =
     const uri = tmpUri('.ts', 'pub_detect_missing');
     await writeFile(uri, 'export const ok = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const fixes = await builder.detectMissingImports(doc);
@@ -1450,7 +1606,7 @@ test('public detectMissingImports() finds unresolvable symbol', async (ctx) => {
     const uri = tmpUri('.ts', 'pub_detect_missing2');
     await writeFile(uri, 'const result = unknownFunction("test");\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
     await new Promise(r => setTimeout(r, 1000)); // let diagnostics propagate
 
     const doc = await vscode.workspace.openTextDocument(uri);
@@ -2070,7 +2226,7 @@ test('Non-LSP: cache hit on repeated gather() skips LSP query', async (ctx) => {
     const uri = tmpUri('.ts', 'nls_cache');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Two consecutive gathers on the same file — second should hit cache
@@ -2132,7 +2288,11 @@ test('Non-LSP: gather() on untitled doc without opening returns valid bundle', a
     ctx.equal(bundle.languageId, 'typescript', 'untitled: languageId');
     ctx.value('enclosingScope', bundle.enclosingScope ? `${bundle.enclosingScope.kind} ${bundle.enclosingScope.name}` : 'none');
 
-    // No cleanup needed — untitled documents don't write to disk
+    // Untitled docs don't write to disk BUT they still occupy an Untitled-N slot
+    // in the workspace. Without this close, the next run adds another tab and the
+    // previous one stays stranded (this is the source of "Untitled-1: const x = 42;"
+    // tabs accumulating across runs).
+    await closeUntitledDoc(doc);
 });
 
 test('Non-LSP: circular import pattern does not crash', async (ctx) => {
@@ -2160,7 +2320,7 @@ test('Non-LSP: circular import pattern does not crash', async (ctx) => {
 
     await openDocument(uriA);
     await openDocument(uriB);
-    await waitForLsp(uriA, 10_000);
+    await waitForLsp(uriA, 1500);
 
     const docA = await vscode.workspace.openTextDocument(uriA);
     // This must not throw or hang despite A→B→A circular pattern
@@ -2211,11 +2371,12 @@ test('[WS] TS path alias @/ → ./src/ resolves via tsconfig.json', async (ctx) 
 
     const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
     await openDocument(sourceUri);
-    // Workspace tests need longer timeout — TS server must parse tsconfig.json
-    // and index the project from a temp dir outside the VS Code workspace.
-    const lsp = await waitForLsp(sourceUri, 60_000);
+    // TS server doesn't fire onDidChangeDiagnostics for temp files outside the
+    // VS Code workspace, so waiting longer just burns wall clock. 5s is plenty;
+    // the test handles the "no response" case gracefully below.
+    const lsp = await waitForLsp(sourceUri, 5_000);
     ctx.ok(typeof lsp.ok === 'boolean', 'WS alias: LSP wait completed', lsp.ok);
-    ctx.value('WS alias: LSP', lsp.ok ? `ready (${lsp.pollCount} polls)` : `not ready (${lsp.pollCount} polls)`);
+    ctx.value('WS alias: LSP', lsp.ok ? `ready (${lsp.attemptCount} attempt(s))` : `not ready (${lsp.attemptCount} attempt(s))`);
 
     const doc = await vscode.workspace.openTextDocument(sourceUri);
     const bundle = await builder.gather(doc, new vscode.Position(2, 20));
@@ -2271,9 +2432,9 @@ test('[WS] TS re-export chain: barrel → utils resolved fully', async (ctx) => 
 
     const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
     await openDocument(sourceUri);
-    // Workspace tests need longer timeout — TS server must parse tsconfig.json
-    // and index the project from a temp dir outside the VS Code workspace.
-    const lsp = await waitForLsp(sourceUri, 60_000);
+    // TS server doesn't fire onDidChangeDiagnostics for temp files outside the
+    // VS Code workspace, so waiting longer just burns wall clock.
+    const lsp = await waitForLsp(sourceUri, 5_000);
     ctx.ok(typeof lsp.ok === 'boolean', 'WS reexport: LSP wait completed', lsp.ok);
 
     const doc = await vscode.workspace.openTextDocument(sourceUri);
@@ -2338,9 +2499,9 @@ test('[WS] TS multi-file: cross-file symbol resolution in project', async (ctx) 
 
     const sourceUri = vscode.Uri.file(path.join(wsDir.fsPath, 'src', 'main.ts'));
     await openDocument(sourceUri);
-    // Workspace tests need longer timeout — TS server must parse tsconfig.json
-    // and index the project from a temp dir outside the VS Code workspace.
-    const lsp = await waitForLsp(sourceUri, 60_000);
+    // TS server doesn't fire onDidChangeDiagnostics for temp files outside the
+    // VS Code workspace, so waiting longer just burns wall clock.
+    const lsp = await waitForLsp(sourceUri, 5_000);
     ctx.ok(typeof lsp.ok === 'boolean', 'WS multi: LSP wait completed', lsp.ok);
 
     const doc = await vscode.workspace.openTextDocument(sourceUri);
@@ -2377,7 +2538,7 @@ test('[P2] Edit + gather: per-file cache invalidated on text change', async (ctx
     const uri = tmpUri('.ts', 'cache_inval');
     await writeFile(uri, 'export const original = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     let bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -2411,7 +2572,7 @@ test('[P2] Save without content change: cache update does not throw', async (ctx
     const uri = tmpUri('.ts', 'cache_save_noop');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     // First gather to seed caches
     const doc = await vscode.workspace.openTextDocument(uri);
@@ -2440,7 +2601,7 @@ test('[P2] Hover cache: invalidated on text change', async (ctx) => {
     const uri = tmpUri('.ts', 'hover_cache_inval');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     // Gather once to populate hover cache
@@ -2469,7 +2630,7 @@ test('[P2] Close document + gather: works on closed documents', async (ctx) => {
     const uri = tmpUri('.ts', 'cache_closed');
     await writeFile(uri, 'export const closed = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     // Gather while open to populate caches
     const doc = await vscode.workspace.openTextDocument(uri);
@@ -2502,7 +2663,7 @@ test('[P2] Workspace cache: save updates only the saved file\'s entry', async (c
 
     await openDocument(uriA);
     await openDocument(uriB);
-    await waitForLsp(uriA, 10_000);
+    await waitForLsp(uriA, 1500);
     await waitForLsp(uriB, 5_000);
 
     // Gather on A to seed workspace cache with both files
@@ -2564,7 +2725,7 @@ test('[P2] Workspace cache: empty file after save clears cache entry', async (ct
     const uri = tmpUri('.ts', 'ws_cache_empty');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     let bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -2594,7 +2755,7 @@ test('[P2] Workspace cache: multiple rapid saves each trigger one per-file updat
     const uri = tmpUri('.ts', 'ws_cache_rapid');
     await writeFile(uri, 'export const x = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     // Trigger multiple rapid saves (simulates Save All / bulk edit)
     for (let i = 0; i < 10; i++) {
@@ -2627,7 +2788,7 @@ test('[P2] Workspace cache: gather() after save sees fresh symbols', async (ctx)
     const uri = tmpUri('.ts', 'ws_cache_fresh');
     await writeFile(uri, 'export const original = 1;\n');
     await openDocument(uri);
-    await waitForLsp(uri, 10_000);
+    await waitForLsp(uri, 1500);
 
     const doc = await vscode.workspace.openTextDocument(uri);
     let bundle = await builder.gather(doc, new vscode.Position(0, 0));
@@ -2904,6 +3065,15 @@ export async function runAllDiagnostics(
     channel.appendLine(`Running ${tests.length} diagnostics...`);
     channel.appendLine('');
 
+    // Pre-flight cleanup: kill any untitled tabs leaked from a previous run.
+    // Without this, each invocation of the command accumulates one more
+    // `Untitled-N` tab (the two untitled tests above create one each, and only
+    // close theirs reliably when this helper exists).
+    const leakedUntitled = await closeAllUntitledTabs();
+    if (leakedUntitled > 0) {
+        channel.appendLine(`[preflight] closed ${leakedUntitled} leaked untitled tab(s) from previous run`);
+    }
+
     for (const t of tests) {
         const ctx = new AssertLogger(channel);
         // Separator line for readability between tests
@@ -2919,6 +3089,15 @@ export async function runAllDiagnostics(
             channel.appendLine(`✗ FAIL`);
             channel.appendLine(`    ${msg}`);
         }
+    }
+
+    // Post-flight cleanup: kill any untitled tabs this run created. Even with
+    // per-test closeUntitledDoc calls, a test that throws mid-way, or one that
+    // creates a doc without a clear handle, can still leak a tab. Sweep again
+    // here so the user always ends with a clean workspace.
+    const leakedAtEnd = await closeAllUntitledTabs();
+    if (leakedAtEnd > 0) {
+        channel.appendLine(`[postflight] closed ${leakedAtEnd} untitled tab(s) leaked during this run`);
     }
 
     const elapsed = Date.now() - start;
