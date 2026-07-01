@@ -173,12 +173,12 @@ export function findStatementEndHeuristic(
     if (lines.length === 0) return 0;
     const safeStart = Math.max(0, Math.min(startLine, lines.length - 1));
     const endOfDoc = lines.length - 1;
-    const budgetEnd = Math.max(safeStart, Math.min(safeStart + maxLines - 1, endOfDoc));
     const baseIndent = guessIndent(lines[safeStart]);
 
     let bracketDepth = 0;
 
-    for (let line = safeStart; line <= budgetEnd; line++) {
+    // Scan at most maxLines lines (exclusive bound)
+    for (let line = safeStart; line < safeStart + maxLines && line <= endOfDoc; line++) {
         const text = lines[line];
         if (text === undefined) continue;
         const trimmed = text.trim();
@@ -240,8 +240,10 @@ export function findStatementEndHeuristic(
         return line - 1;
     }
 
-    // Budget cap reached, return the last line scanned
-    return budgetEnd;
+    // Budget cap reached — return the last line scanned (don't exceed document)
+    return safeStart + maxLines <= endOfDoc
+        ? safeStart + maxLines - 1
+        : endOfDoc;
 }
 
 /**
