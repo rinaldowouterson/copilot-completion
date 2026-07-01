@@ -132,11 +132,15 @@ suite('lspSupport (Phase D)', () => {
         assert.strictEqual(typeof result, 'boolean');
     });
 
-    test('tryDirectInstall never throws (returns boolean)', async () => {
+    test('tryDirectInstall never throws (returns boolean)', async function () {
+        this.timeout(30_000);
         // The internal `workbench.extensions.installExtension` command
         // is callable but in test environments the trust-publisher dialog
         // can't be shown, so it returns false. We only assert it
         // doesn't throw and returns a boolean.
+        // The command may take up to 30s to timeout in the test runner
+        // because DialogService refuses to show the trust dialog, so
+        // the installExtension command hangs internally until timeout.
         const result = await tryDirectInstall('ms-python.vscode-pylance');
         assert.strictEqual(typeof result, 'boolean');
     });

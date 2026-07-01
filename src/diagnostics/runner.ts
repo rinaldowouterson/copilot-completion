@@ -401,59 +401,72 @@ test('languageSyntax matches TypeScript rules', async (ctx) => {
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Helper: create a file for a given language, wait for LSP symbols,
- * and assert or warn.
+ * Check if a VS Code extension is installed.
+ */
+function isExtensionInstalled(id: string): boolean {
+    return vscode.extensions.getExtension(id) !== undefined;
+}
+
+/**
+ * Hard-assert LSP detection: first check if the extension is installed,
+ * then probe for symbols. If the extension IS installed but the LSP
+ * doesn't respond, that's a hard failure. If the extension is NOT
+ * installed, skip gracefully with a note.
  */
 async function testLspDetection(
+    ctx: AssertLogger,
     label: string,
     ext: string,
     content: string,
+    extensionId: string,
     timeoutMs: number = 15_000,
 ): Promise<void> {
+    if (!isExtensionInstalled(extensionId)) {
+        ctx.value(`LSP: ${label}`, `skipped — extension ${extensionId} not installed`);
+        return;
+    }
     const uri = tmpUri(ext, `lsp_${label}`);
     await writeFile(uri, content);
     await openDocument(uri);
     const ok = await waitForLsp(uri, timeoutMs);
-    if (!ok) {
-        console.warn(`[diagnostics] LSP not detected for ${label} (extension may not be installed)`);
-    }
+    ctx.ok(ok, `LSP: ${label} returns symbols within ${timeoutMs}ms (${extensionId} installed)`, ok);
     await removeFile(uri);
 }
 
-test('LSP: Rust (rust-analyzer) responds with symbols', async () => {
-    await testLspDetection('rust', '.rs', 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n');
+test('LSP: Rust (rust-analyzer) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'rust', '.rs', 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n', 'rust-lang.rust-analyzer');
 });
 
-test('LSP: Java (redhat.java) responds with symbols', async () => {
-    await testLspDetection('java', '.java',
-        'public class Hello {\n    public static void main(String[] args) {}\n}\n');
+test('LSP: Java (redhat.java) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'java', '.java',
+        'public class Hello {\n    public static void main(String[] args) {}\n}\n', 'redhat.java');
 });
 
-test('LSP: C# (ms-dotnettools.csharp) responds with symbols', async () => {
-    await testLspDetection('csharp', '.cs',
-        'class Hello { static void Main() {} }\n');
+test('LSP: C# (ms-dotnettools.csharp) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'csharp', '.cs',
+        'class Hello { static void Main() {} }\n', 'ms-dotnettools.csharp');
 });
 
-test('LSP: C/C++ (ms-vscode.cpptools) responds with symbols', async () => {
-    await testLspDetection('cpp', '.cpp', 'int main() { return 0; }\n');
-    await testLspDetection('c', '.c', 'int main() { return 0; }\n');
+test('LSP: C/C++ (ms-vscode.cpptools) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'cpp', '.cpp', 'int main() { return 0; }\n', 'ms-vscode.cpptools');
+    await testLspDetection(ctx, 'c', '.c', 'int main() { return 0; }\n', 'ms-vscode.cpptools');
 });
 
-test('LSP: PHP (Intelephense) responds with symbols', async () => {
-    await testLspDetection('php', '.php', '<?php function greet($name) { return "hello $name"; }\n');
+test('LSP: PHP (Intelephense) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'php', '.php', '<?php function greet($name) { return "hello $name"; }\n', 'bmewburn.vscode-intelephense-client');
 });
 
-test('LSP: Ruby (Ruby LSP) responds with symbols', async () => {
-    await testLspDetection('ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n');
+test('LSP: Ruby (Ruby LSP) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n', 'shopify.ruby-lsp');
 });
 
-test('LSP: Dart responds with symbols', async () => {
-    await testLspDetection('dart', '.dart',
-        'void main() { print("hello"); }\n');
+test('LSP: Dart responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'dart', '.dart',
+        'void main() { print("hello"); }\n', 'dart-code.dart-code');
 });
 
-test('LSP: Lua (sumneko.lua) responds with symbols', async () => {
-    await testLspDetection('lua', '.lua', 'function greet(name) return "hello " .. name end\n');
+test('LSP: Lua (sumneko.lua) responds with symbols', async (ctx) => {
+    await testLspDetection(ctx, 'lua', '.lua', 'function greet(name) return "hello " .. name end\n', 'sumneko.lua');
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -535,12 +548,18 @@ test('Phase G: superTypes resolved for class inheritance', async (ctx) => {
     // Cursor on line 1 (class Derived), column 6
     const bundle = await builder.gather(doc, new vscode.Position(1, 6));
 
-    ctx.value('superTypes', bundle.superTypes ? bundle.superTypes.map(s => s.name) : 'undefined');
+    const names = bundle.superTypes ? bundle.superTypes.map(s => s.name) : undefined;
+    ctx.value('superTypes', names ?? 'undefined');
 
-    // Phase G: if LSP supports type hierarchy, superTypes may be populated.
+    // Hard assertion: TypeScript LSP supports type hierarchy, so for
+    // `class Derived implements Base`, superTypes should contain 'Base'.
+    // If the LSP doesn't support TypeHierarchy for TS (unlikely for
+    // modern VS Code), this will fail — which is correct, it means
+    // the feature regressed.
     if (bundle.superTypes && bundle.superTypes.length > 0) {
-        const names = bundle.superTypes.map(s => s.name);
-        ctx.arrayContains(names, 'Base', 'superTypes contains Base');
+        ctx.arrayContains(names!, 'Base', 'superTypes contains Base');
+    } else {
+        ctx.ok(false, 'superTypes resolved (TypeScript supports TypeHierarchy)', names);
     }
 
     await removeFile(uri);
@@ -724,7 +743,7 @@ test('[P0] Phase H: actual missing-import detection', async (ctx) => {
     await removeFile(uri);
 });
 
-test('[P1] Phase H: gather() on empty file does not throw', async () => {
+test('[P1] Phase H: gather() on empty file does not throw', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -737,17 +756,14 @@ test('[P1] Phase H: gather() on empty file does not throw', async () => {
     const doc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
 
-    assert.ok(Array.isArray(bundle.fileExports), 'fileExports must be array on empty file');
-    assert.strictEqual(bundle.fileExports.length, 0, 'empty file has no exports');
-    assert.ok(Array.isArray(bundle.importResolutions));
-    assert.strictEqual(bundle.importResolutions.length, 0);
-    assert.ok(Array.isArray(bundle.missingImports));
-
-    // statementEndLine should still be a number (heuristic fallback)
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine must be number on empty file, got ${typeof bundle.statementEndLine}`);
-
-    console.log(`[diagnostics] Empty file: statementEndLine=${bundle.statementEndLine}, languageId=${bundle.languageId}`);
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.equal(bundle.fileExports.length, 0, 'empty file exports count');
+    ctx.ok(Array.isArray(bundle.importResolutions), 'importResolutions is array');
+    ctx.equal(bundle.importResolutions.length, 0, 'empty file importResolutions');
+    ctx.ok(Array.isArray(bundle.missingImports), 'missingImports is array');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type (heuristic)');
+    ctx.value('statementEndLine', bundle.statementEndLine);
+    ctx.equal(bundle.languageId, 'typescript', 'languageId');
 
     await removeFile(uri);
 });
@@ -1013,7 +1029,7 @@ test('public detectMissingImports() finds unresolvable symbol', async (ctx) => {
 //  Workspace cache: incremental per-file update on save
 // ──────────────────────────────────────────────────────────────
 
-test('[P2] Workspace cache: save updates only the saved file\'s entry', async () => {
+test('[P2] Workspace cache: save updates only the saved file\'s entry', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -1032,29 +1048,30 @@ test('[P2] Workspace cache: save updates only the saved file\'s entry', async ()
     // Gather on A to seed workspace cache with both files
     const docA = await vscode.workspace.openTextDocument(uriA);
     const bundleBefore = await builder.gather(docA, new vscode.Position(0, 0));
-    assert.ok(Array.isArray(bundleBefore.fileExports));
+    ctx.ok(Array.isArray(bundleBefore.fileExports), 'pre-save fileExports is array');
+    ctx.value('fileA exports (pre)', bundleBefore.fileExports.map(e => e.name));
 
     // Modify and save file B — should update only B's cache entry
     await writeFile(uriB, 'export const b_updated = 22;\n');
     const docB = await vscode.workspace.openTextDocument(uriB);
     const saveOk = await docB.save();
-    assert.ok(saveOk, 'docB.save() must return true — event must fire for cache update');
+    ctx.ok(saveOk, 'docB.save() succeeded');
 
     // Wait for the async cache update to settle
     await new Promise(r => setTimeout(r, 1000));
 
     // Gather on A again — A's exports should be unchanged, B should be fresh
     const bundleAfter = await builder.gather(docA, new vscode.Position(0, 0));
-    assert.ok(Array.isArray(bundleAfter.fileExports));
-    // fileExports on A should still be the original (a=1) since only B was saved
+    ctx.ok(Array.isArray(bundleAfter.fileExports), 'post-save fileExports is array');
     const exportNames = bundleAfter.fileExports.map(e => e.name);
-    console.log(`[diagnostics] Workspace cache: fileA exports=[${exportNames.join(',')}] (should still contain 'a')`);
+    ctx.value('fileA exports (post)', exportNames);
+    ctx.ok(exportNames.includes('a'), 'fileA still has export "a" after fileB save', exportNames);
 
     await removeFile(uriA);
     await removeFile(uriB);
 });
 
-test('[P2] Workspace cache: LSP unavailable per-file falls back gracefully', async () => {
+test('[P2] Workspace cache: LSP unavailable per-file falls back gracefully', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -1067,21 +1084,19 @@ test('[P2] Workspace cache: LSP unavailable per-file falls back gracefully', asy
 
     const doc = await vscode.workspace.openTextDocument(uri);
     const saveOk = await doc.save();
-    assert.ok(saveOk, 'doc.save() must return true for .txt file');
+    ctx.ok(saveOk, 'txt file save succeeded');
 
     // Even with no LSP, gather() must not throw and should return a valid bundle
     const bundle = await builder.gather(doc, new vscode.Position(0, 0));
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.strictEqual(bundle.fileExports.length, 0, 'plain text has no exports');
-    assert.ok(typeof bundle.statementEndLine === 'number',
-        `statementEndLine must be number for plain text, got ${typeof bundle.statementEndLine}`);
-
-    console.log('[diagnostics] Workspace cache: no-LSP file save did not throw');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.equal(bundle.fileExports.length, 0, 'plain text exports count');
+    ctx.typeOf(bundle.statementEndLine, 'number', 'statementEndLine type (no LSP)');
+    ctx.value('statementEndLine (no LSP)', bundle.statementEndLine);
 
     await removeFile(uri);
 });
 
-test('[P2] Workspace cache: empty file after save clears cache entry', async () => {
+test('[P2] Workspace cache: empty file after save clears cache entry', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -1093,26 +1108,25 @@ test('[P2] Workspace cache: empty file after save clears cache entry', async () 
 
     const doc = await vscode.workspace.openTextDocument(uri);
     let bundle = await builder.gather(doc, new vscode.Position(0, 0));
-    assert.ok(bundle.fileExports.length >= 1, 'file should have exports before empty save');
+    ctx.ok(bundle.fileExports.length >= 1, 'exports present before empty save');
+    ctx.value('exports before', bundle.fileExports.map(e => e.name));
 
     // Replace content with empty string and save
     await writeFile(uri, '');
     const emptyDoc = await vscode.workspace.openTextDocument(uri);
     const saveOk = await emptyDoc.save();
-    assert.ok(saveOk, 'empty doc save must return true');
+    ctx.ok(saveOk, 'empty doc save succeeded');
     await new Promise(r => setTimeout(r, 1000));
 
     // Gather again — cache entry should now reflect the empty file
     bundle = await builder.gather(emptyDoc, new vscode.Position(0, 0));
-    assert.ok(Array.isArray(bundle.fileExports));
-    assert.strictEqual(bundle.fileExports.length, 0, 'empty file must have 0 exports after save');
-
-    console.log('[diagnostics] Workspace cache: empty file after save → exports=0');
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array');
+    ctx.equal(bundle.fileExports.length, 0, 'exports cleared after empty save');
 
     await removeFile(uri);
 });
 
-test('[P2] Workspace cache: multiple rapid saves each trigger one per-file update', async () => {
+test('[P2] Workspace cache: multiple rapid saves each trigger one per-file update', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -1127,7 +1141,7 @@ test('[P2] Workspace cache: multiple rapid saves each trigger one per-file updat
         await writeFile(uri, `export const x = ${i};\n`);
         const freshDoc = await vscode.workspace.openTextDocument(uri);
         const ok = await freshDoc.save();
-        assert.ok(ok, `save #${i} must return true`);
+        ctx.ok(ok, `save #${i} succeeded`);
         // Each save fires a separate onDidSaveTextDocument event; each
         // event triggers one _updateFileInWorkspaceCache call. Since each
         // call is cheap (~5ms single-file query), no debounce is needed.
@@ -1138,15 +1152,14 @@ test('[P2] Workspace cache: multiple rapid saves each trigger one per-file updat
 
     const finalDoc = await vscode.workspace.openTextDocument(uri);
     const bundle = await builder.gather(finalDoc, new vscode.Position(0, 0));
-    assert.ok(Array.isArray(bundle.fileExports), 'fileExports must be array after rapid saves');
-    assert.strictEqual(bundle.languageId, 'typescript');
-
-    console.log(`[diagnostics] Workspace cache: 10 rapid saves OK, exports=${bundle.fileExports.length}`);
+    ctx.ok(Array.isArray(bundle.fileExports), 'fileExports is array after rapid saves');
+    ctx.equal(bundle.languageId, 'typescript', 'languageId after rapid saves');
+    ctx.value('exports after 10 saves', bundle.fileExports.map(e => e.name));
 
     await removeFile(uri);
 });
 
-test('[P2] Workspace cache: gather() after save sees fresh symbols', async () => {
+test('[P2] Workspace cache: gather() after save sees fresh symbols', async (ctx) => {
     const log = new LogService();
     log.enabled = false;
     const builder = new ContextBuilderService(log);
@@ -1159,22 +1172,21 @@ test('[P2] Workspace cache: gather() after save sees fresh symbols', async () =>
     const doc = await vscode.workspace.openTextDocument(uri);
     let bundle = await builder.gather(doc, new vscode.Position(0, 0));
     const originalNames = bundle.fileExports.map(e => e.name);
-    assert.ok(originalNames.includes('original'), 'must see original export before save');
+    ctx.arrayContains(originalNames, 'original', 'original export present before save');
 
     // Replace with different exports and save
     await writeFile(uri, 'export const replaced = 2;\nexport function helper() {}\n');
     const newDoc = await vscode.workspace.openTextDocument(uri);
     const saveOk = await newDoc.save();
-    assert.ok(saveOk, 'save must succeed');
+    ctx.ok(saveOk, 'save succeeded');
     await new Promise(r => setTimeout(r, 1000));
 
     // Gather again — should see the REPLACED exports, not the originals
     bundle = await builder.gather(newDoc, new vscode.Position(0, 0));
     const newNames = bundle.fileExports.map(e => e.name);
-    assert.ok(newNames.includes('replaced'), `must see 'replaced' after save, got [${newNames.join(',')}]`);
-    assert.ok(newNames.includes('helper'), `must see 'helper' after save, got [${newNames.join(',')}]`);
-
-    console.log(`[diagnostics] Workspace cache: exports changed from [${originalNames.join(',')}] → [${newNames.join(',')}] after save`);
+    ctx.value('exports after save', newNames);
+    ctx.arrayContains(newNames, 'replaced', 'replaced export present after save');
+    ctx.arrayContains(newNames, 'helper', 'helper export present after save');
 
     await removeFile(uri);
 });
@@ -1183,23 +1195,25 @@ test('[P2] Workspace cache: gather() after save sees fresh symbols', async () =>
 //  LSP extension registry validation
 // ──────────────────────────────────────────────────────────────
 
-test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async () => {
+test('LspSupportNotifier: LANG_TO_LSP_EXTENSIONS entries are valid', async (ctx) => {
     for (const [lang, exts] of Object.entries(LANG_TO_LSP_EXTENSIONS)) {
-        assert.ok(Array.isArray(exts), `${lang} extensions must be an array`);
+        ctx.ok(Array.isArray(exts), `${lang} extensions is array`);
         for (const ext of exts) {
-            assert.ok(typeof ext.name === 'string' && ext.name.length > 0,
-                `${lang}: name must be non-empty`);
-            assert.ok(typeof ext.id === 'string' && ext.id.includes('.'),
-                `${lang}: id must be publisher.name, got ${ext.id}`);
-            assert.ok(ext.marketplaceUrl.startsWith('https://marketplace.visualstudio.com/items?itemName='),
-                `${lang}: marketplaceUrl must be a marketplace URL`);
-            assert.ok(ext.marketplaceUrl.endsWith(ext.id),
-                `${lang}: marketplaceUrl should end with extension id`);
+            ctx.ok(typeof ext.name === 'string' && ext.name.length > 0,
+                `${lang}: name is non-empty`, ext.name);
+            ctx.ok(typeof ext.id === 'string' && ext.id.includes('.'),
+                `${lang}: id has publisher.name format`, ext.id);
+            ctx.ok(ext.marketplaceUrl.startsWith('https://marketplace.visualstudio.com/items?itemName='),
+                `${lang}: marketplaceUrl starts with marketplace URL`, ext.marketplaceUrl);
+            ctx.ok(ext.marketplaceUrl.endsWith(ext.id),
+                `${lang}: marketplaceUrl ends with extension id`);
             const uri = extensionUriFor(ext.id);
-            assert.strictEqual(uri.scheme, 'vscode');
-            assert.ok(uri.toString().endsWith(ext.id));
+            ctx.equal(uri.scheme, 'vscode', `${ext.id}: URI scheme`);
+            ctx.ok(uri.toString().endsWith(ext.id),
+                `${ext.id}: URI ends with extension id`, uri.toString());
         }
     }
+    ctx.value('LSP registry', `${Object.keys(LANG_TO_LSP_EXTENSIONS).length} languages validated`);
 });
 
 // ──────────────────────────────────────────────────────────────
