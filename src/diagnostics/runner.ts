@@ -22,6 +22,9 @@ import { ContextBuilderService, normalizePath, extractRelativeImportSpecifiers }
 import { LogService } from '../completions/shared/log/logService';
 import { LANG_TO_LSP_EXTENSIONS, extensionUriFor, hasLspSupport } from '../completions/context/lspSupport';
 import { cleanHoverSignature } from '../completions/context/hoverEnrichment';
+import { flattenWorkspaceEdit } from '../completions/context/autoImport';
+import { buildExportsLine, buildImportLine } from '../completions/ghost/promptFactory';
+import { findStatementEndHeuristic } from '../common/languageSyntax';
 import { inferFileKindFromExtension, isBinaryKind } from '../common/fileKind';
 
 // ──────────────────────────────────────────────────────────────
@@ -164,6 +167,21 @@ class AssertLogger {
         } else {
             this._channel.appendLine(`  ✗ ${label}: expected ${type}, got ${actualType}`);
             assert.strictEqual(actualType, type, label);
+        }
+    }
+
+    /** Assert deep equality (handles arrays, objects). Uses JSON serialization for logging. */
+    deepEqual<T>(actual: T, expected: T, label: string): void {
+        this._checks++;
+        try {
+            assert.deepStrictEqual(actual, expected);
+            const str = typeof expected === 'object' ? JSON.stringify(expected) : String(expected);
+            this._channel.appendLine(`  ✓ ${label}: ${str}`);
+        } catch {
+            const aStr = typeof actual === 'object' ? JSON.stringify(actual) : String(actual);
+            const eStr = typeof expected === 'object' ? JSON.stringify(expected) : String(expected);
+            this._channel.appendLine(`  ✗ ${label}: expected ${eStr}, got ${aStr}`);
+            assert.deepStrictEqual(actual, expected, label);
         }
     }
 
@@ -1292,6 +1310,155 @@ test('public detectMissingImports() finds unresolvable symbol', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────────────
+//  Pure-function utility tests (ported from old .test.ts files)
+// ──────────────────────────────────────────────────────────────
+
+test('flattenWorkspaceEdit: extracts TextEdit entries across URIs', async (ctx) => {
+    const edit = {
+        entries() {
+            return [
+                [
+                    { toString: () => 'file:///a.ts' },
+                    [
+                        { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'import x from "x";\n' },
+                        { range: { start: { line: 5, character: 0 }, end: { line: 5, character: 0 } }, newText: 'y();\n' },
+                    ],
+                ],
+                [
+                    { toString: () => 'file:///b.ts' },
+                    [
+                        { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'import z from "z";\n' },
+                    ],
+                ],
+            ];
+        },
+    } as any;
+
+    const out = flattenWorkspaceEdit(edit);
+    ctx.equal(out.length, 3, '3 text edits across 2 files');
+    ctx.ok(out[0].newText.startsWith('import x'), 'first edit: import x');
+    ctx.ok(out[2].newText.startsWith('import z'), 'third edit: import z');
+});
+
+test('flattenWorkspaceEdit: skips snippet edits', async (ctx) => {
+    const edit = {
+        entries() {
+            return [
+                [
+                    { toString: () => 'file:///a.ts' },
+                    [
+                        { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'plain' },
+                        { range: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } }, newText: 'snip', snippet: 'snip(${1})' },
+                    ],
+                ],
+            ];
+        },
+    } as any;
+
+    const out = flattenWorkspaceEdit(edit);
+    ctx.equal(out.length, 1, 'snippet edit filtered out');
+    ctx.equal(out[0].newText, 'plain', 'only plain edit survives');
+});
+
+test('flattenWorkspaceEdit: returns empty for empty input', async (ctx) => {
+    const edit = { entries() { return []; } } as any;
+    ctx.equal(flattenWorkspaceEdit(edit).length, 0, 'empty input → empty output');
+});
+
+test('buildExportsLine: formatting and all-or-nothing truncation', async (ctx) => {
+    const E = (name: string, kind: string, type?: string) => ({ name, kind, line: 1, type });
+
+    // name:type when type present
+    const out1 = buildExportsLine([E('foo', 'Function', '(x: number) => string')], 100);
+    ctx.ok(out1.includes('foo:(x: number) => string'), 'type shown when present');
+
+    // fallback to kind
+    const out2 = buildExportsLine([E('Foo', 'Class')], 100);
+    ctx.ok(out2.includes('Foo:Class'), 'kind fallback when type absent');
+
+    // all-or-nothing: long export with tight budget
+    const longType = 'function foo(a: number, b: string, c: boolean, d: Date, e: RegExp): { x: string; y: number; z: boolean }';
+    const out3 = buildExportsLine([
+        E('short1', 'Function', '() => void'),
+        E('longExport', 'Function', longType),
+        E('short2', 'Function', '() => void'),
+    ], 30);
+    ctx.ok(out3.includes('short1'), 'first short export included');
+    ctx.ok(!out3.includes('longExport:function foo('), 'long export not partially truncated');
+    ctx.ok(/\.\.\. \(\+\d+ more\)/.test(out3), 'skipped count marker present');
+
+    // single line, no embedded newlines
+    const out4 = buildExportsLine([E('a', 'Function'), E('b', 'Function'), E('c', 'Function')], 100);
+    ctx.ok(!out4.includes('\n'), 'single line output');
+
+    // empty
+    ctx.equal(buildExportsLine([], 100), 'exports: ', 'empty exports');
+});
+
+test('buildImportLine: uses relativePath and respects typeSignatures', async (ctx) => {
+    const makeImp = (overrides: Record<string, any> = {}) => ({
+        uri: 'file:///abs/utils.ts',
+        relativePath: './utils.ts',
+        exports: [{ name: 'parseISO', kind: 'Function', line: 1 }],
+        fileKind: 'code' as const,
+        ...overrides,
+    });
+
+    // relativePath used as label
+    const out1 = buildImportLine(makeImp());
+    ctx.ok(out1.startsWith('./utils.ts:'), 'starts with relativePath');
+
+    // typeSignatures displayed
+    const out2 = buildImportLine(makeImp({ typeSignatures: { parseISO: '(s: string) => Date' } }));
+    ctx.ok(out2.includes('parseISO:(s: string) => Date'), 'hover signature shown');
+
+    // fallback to kind
+    const out3 = buildImportLine(makeImp());
+    ctx.ok(out3.includes('parseISO:Function'), 'kind fallback when no typeSignature');
+
+    // 12 exports capped at 8
+    const manyExps = Array.from({ length: 12 }, (_, i) => ({ name: `fn${i}`, kind: 'Function', line: i, type: '() => void' }));
+    const out4 = buildImportLine(makeImp({ exports: manyExps }));
+    for (let i = 0; i < 8; i++) ctx.ok(out4.includes(`fn${i}:() => void`), `fn${i} in output`);
+    for (let i = 8; i < 12; i++) ctx.ok(!out4.includes(`fn${i}:`), `fn${i} excluded`);
+
+    // empty exports
+    ctx.equal(buildImportLine(makeImp({ exports: [] })), './utils.ts: ', 'empty exports');
+});
+
+test('findStatementEndHeuristic: semicolons, continuations, indentation', async (ctx) => {
+    const syntax = (overrides: Record<string, any> = {}) => ({
+        semicolons: true, indentationSignificant: false, brackets: [] as string[], continuationOperators: [] as string[], comment: '//',
+        ...overrides,
+    });
+
+    // Semicolons: statement ends at semicolon on same line
+    const lines1 = ['const x = 1;', 'const y = 2;'];
+    ctx.equal(findStatementEndHeuristic(lines1, 0, syntax()), 0,
+        'semicolon on same line');
+
+    // Continuation operators: line ending with comma continues
+    const lines2 = ['const x = [1,', '2,', '3];'];
+    ctx.equal(findStatementEndHeuristic(lines2, 0, syntax({ continuationOperators: [','] })), 2,
+        'comma continuation spans lines');
+
+    // Python: no semicolons, block ends at dedent
+    const lines3 = ['if True:', '    pass', 'x = 1'];
+    ctx.equal(findStatementEndHeuristic(lines3, 0, syntax({ semicolons: false, indentationSignificant: true, continuationOperators: [':'], comment: '#' })), 0,
+        'Python if ends at line end (no continuation)');
+
+    // Comments don't break continuation
+    const lines4 = ['const x = [1, // comment', '2,', '3];'];
+    ctx.equal(findStatementEndHeuristic(lines4, 0, syntax({ continuationOperators: [','] })), 2,
+        'comment line still continues with comma');
+
+    // Budget limit: max 10 lines scanned
+    const longLines = Array.from({ length: 20 }, (_, i) => `x${i},`);
+    ctx.equal(findStatementEndHeuristic(longLines, 0, syntax({ continuationOperators: [','] }), 10), 9,
+        'budget limit of 10 lines');
+});
+
+// ──────────────────────────────────────────────────────────────
 //  Non-LSP paths: regex fallback, cache, heuristics
 // ──────────────────────────────────────────────────────────────
 
@@ -1323,6 +1490,127 @@ test('Non-LSP: regex fallback handles multiple languages', async (ctx) => {
     ctx.equal(cpp_specs.length, 1, 'C++: only 1 quoted include');
 
     ctx.value('regex fallback', '5 languages validated');
+});
+
+test('Non-LSP: regex fallback edge cases — JS/TS', async (ctx) => {
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { foo } from './utils/foo';`, 'typescript').length, 1,
+        'static import');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`const m = import('./lazy');`, 'typescript')[0], './lazy',
+        'dynamic import');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`const x = require('./x');`, 'typescript')[0], './x',
+        'require');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { foo } from "./utils/foo";`, 'typescript')[0], './utils/foo',
+        'double quotes');
+    ctx.deepEqual(
+        extractRelativeImportSpecifiers(`import { useState } from 'react';\nimport { y } from './relative';`, 'typescript'),
+        ['./relative'],
+        'bare module specifiers skipped');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import a from './a'; import b from './b';`, 'typescript').length, 2,
+        'multiple imports one line');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { x } from '../../shared/x';`, 'typescript')[0], '../../shared/x',
+        'parent dir import');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { x } from './a'; import { y } from './a';`, 'typescript').length, 1,
+        'deduplicates');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`const x = 1;\nconst y = 2;\nfunction foo() { return x + y; }`, 'typescript').length, 0,
+        'no imports');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import React from 'react';\nimport Button from './components/Button';`, 'typescriptreact').length, 1,
+        'JSX skips bare, finds relative');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { x } from '@scope/pkg';`, 'typescript').length, 0,
+        'scoped package skipped');
+    ctx.equal(
+        extractRelativeImportSpecifiers(`import { x } from './utils/helpers';`, 'typescript')[0], './utils/helpers',
+        'subpath import');
+    ctx.ok(
+        Array.isArray(extractRelativeImportSpecifiers(`const p = require.resolve('./p');`, 'typescript')),
+        'require.resolve does not throw (known limitation: may miss)');
+});
+
+test('Non-LSP: regex fallback edge cases — Python, Ruby, Go, Dart', async (ctx) => {
+    // Python
+    ctx.equal(extractRelativeImportSpecifiers(`from .module import foo`, 'python')[0], '.module', 'Python: from .module');
+    ctx.equal(extractRelativeImportSpecifiers(`from ..pkg import bar`, 'python')[0], '..pkg', 'Python: parent relative');
+    ctx.equal(extractRelativeImportSpecifiers(`from . import baz`, 'python')[0], '.', 'Python: single dot');
+    ctx.equal(extractRelativeImportSpecifiers(`from os import path\nimport sys`, 'python').length, 0, 'Python: abs skipped');
+
+    // Ruby
+    ctx.equal(extractRelativeImportSpecifiers(`require './file'`, 'ruby')[0], './file', 'Ruby: require relative');
+    ctx.equal(extractRelativeImportSpecifiers(`require_relative '../file'`, 'ruby')[0], '../file', 'Ruby: require_relative');
+    ctx.equal(extractRelativeImportSpecifiers(`require 'json'`, 'ruby').length, 0, 'Ruby: gem skipped');
+
+    // Go
+    ctx.equal(extractRelativeImportSpecifiers(`import "./pkg/foo"`, 'go')[0], './pkg/foo', 'Go: double-quoted');
+    ctx.equal(extractRelativeImportSpecifiers(`import './internal/util'`, 'go')[0], './internal/util', 'Go: single-quoted');
+
+    // Dart
+    ctx.equal(extractRelativeImportSpecifiers(`import './foo.dart';`, 'dart')[0], './foo.dart', 'Dart');
+});
+
+test('Non-LSP: regex fallback edge cases — C/C++, PHP, Lua', async (ctx) => {
+    // C/C++
+    ctx.equal(extractRelativeImportSpecifiers(`#include "header.h"`, 'cpp')[0], 'header.h', 'C++: quoted include');
+    ctx.equal(extractRelativeImportSpecifiers(`#include "../path/header.hpp"`, 'c')[0], '../path/header.hpp', 'C: parent dir');
+    ctx.equal(extractRelativeImportSpecifiers(`#include <stdio.h>\n#include <stdlib.h>`, 'c').length, 0, 'C: system header skipped');
+
+    // PHP
+    ctx.equal(extractRelativeImportSpecifiers(`require './file.php';`, 'php')[0], './file.php', 'PHP: require');
+    ctx.equal(extractRelativeImportSpecifiers(`include_once './helpers.php';`, 'php')[0], './helpers.php', 'PHP: include_once');
+
+    // Lua
+    ctx.equal(extractRelativeImportSpecifiers(`local m = require "./module"`, 'lua')[0], './module', 'Lua: require');
+    ctx.equal(extractRelativeImportSpecifiers(`local m = require "./module.lua"`, 'lua')[0], './module.lua', 'Lua: with extension');
+});
+
+test('Non-LSP: regex fallback adversarial — known gaps & bugs', async (ctx) => {
+    // Java: standard package import not relative — NOT detected
+    ctx.equal(extractRelativeImportSpecifiers(`import java.util.List;`, 'java').length, 0,
+        'Java package import not detected (LSP required)');
+    // C# `using System;` not relative
+    ctx.equal(extractRelativeImportSpecifiers(`using System;\nusing System.Collections.Generic;`, 'csharp').length, 0,
+        'C# using not detected (LSP required)');
+    // Rust `use` / `mod` not relative
+    ctx.equal(extractRelativeImportSpecifiers(`use std::collections::HashMap;\nmod utils;\nfn main() {}`, 'rust').length, 0,
+        'Rust use/mod not detected (LSP required)');
+    // Kotlin, Swift, Scala: not relative
+    ctx.equal(extractRelativeImportSpecifiers(`import kotlin.collections.List\nfun main() {}`, 'kotlin').length, 0,
+        'Kotlin package import not detected');
+    ctx.equal(extractRelativeImportSpecifiers(`import Foundation\nlet x = 1`, 'swift').length, 0,
+        'Swift package import not detected');
+    ctx.equal(extractRelativeImportSpecifiers(`import scala.collection._\nobject Foo {}`, 'scala').length, 0,
+        'Scala package import not detected');
+
+    // [KNOWN BUG] backtick template with import keyword
+    ctx.ok(Array.isArray(extractRelativeImportSpecifiers('const tpl = `import x from "./fake"`;', 'typescript')),
+        'template literal does not throw');
+
+    // [KNOWN BUG] require() inside string
+    ctx.ok(Array.isArray(extractRelativeImportSpecifiers(`const code = "require('./fake')";`, 'typescript')),
+        'require in string does not throw');
+
+    // Unicode
+    ctx.deepEqual(
+        extractRelativeImportSpecifiers(`import { café } from './unicode';`, 'typescript'),
+        ['./unicode'],
+        'unicode identifiers');
+
+    // Malformed
+    ctx.ok(Array.isArray(extractRelativeImportSpecifiers(`import foo from './bar';\x00import baz from './qux';`, 'typescript')),
+        'null byte does not throw');
+
+    // Trailing comma, whitespace
+    ctx.equal(extractRelativeImportSpecifiers(`import { a, b, } from './trailing';`, 'typescript')?.[0], './trailing',
+        'trailing comma');
+    ctx.equal(extractRelativeImportSpecifiers(`import {   a   ,   b   } from './spaces';`, 'typescript')?.[0], './spaces',
+        'excess whitespace');
 });
 
 test('Non-LSP: cache hit on repeated gather() skips LSP query', async (ctx) => {
