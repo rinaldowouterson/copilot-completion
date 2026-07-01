@@ -322,9 +322,6 @@
     "vscode:prepublish": "npm run build -- --production",
     "build": "node esbuild.mjs",
     "build:extension": "npm run build -- --production && npx vsce package",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "npm run compile-tests && npm run build && npm run lint",
     "lint": "eslint src",
     "test": "echo 'Run \"CC Completion: Run Diagnostics\" in VS Code instead.'"
   },
@@ -333,11 +330,8 @@
     "diff": "9.0.0"
   },
   "devDependencies": {
-    "@types/mocha": "^10.0.10",
     "@types/node": "^22.20.0",
     "@types/vscode": "^1.110.0",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.25.12",
     "eslint": "^9.39.3",
     "ts-node": "^10.9.2",
