@@ -261,6 +261,44 @@ async function writeTextFile(dir: vscode.Uri, relativePath: string, content: str
     return uri;
 }
 
+/**
+ * Wait until a specific extension has finished activating (its `activate()`
+ * function has returned). Resolves immediately if the extension is already
+ * active. Times out after `timeoutMs` and resolves to `false`.
+ *
+ * `Extension.activate()` returns a promise that resolves with the extension's
+ * public API once `activate()` has returned. For Ruby LSP, `activate()` either
+ * returns after starting the language client or returns early (after showing
+ * a "no workspace" warning) — in both cases the promise resolves, so this
+ * tells us activation is *done*, not necessarily that a client is running.
+ *
+ * Used by the Ruby LSP test to know the activation pipeline (triggered by
+ * `workspaceContains:Gemfile.lock` after we create the fixture via
+ * `applyEdit`) has had a chance to start a language client.
+ */
+async function waitForExtensionActive(
+    extensionId: string,
+    timeoutMs: number = 10_000,
+): Promise<boolean> {
+    const ext = vscode.extensions.getExtension(extensionId);
+    if (!ext) return false;
+    if (ext.isActive) return true;
+    return new Promise<boolean>(resolve => {
+        let done = false;
+        const finish = (v: boolean) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(v);
+        };
+        const timer = setTimeout(() => finish(ext.isActive), timeoutMs);
+        ext.activate().then(
+            () => finish(true),
+            () => finish(false),
+        );
+    });
+}
+
 // ──────────────────────────────────────────────────────────────
 //  Structured assertion logger
 // ──────────────────────────────────────────────────────────────
@@ -821,7 +859,150 @@ test('LSP: PHP responds with symbols', async (ctx) => {
 });
 
 test('LSP: Ruby (Ruby LSP) responds with symbols', async (ctx) => {
-    await testLspDetection(ctx, 'ruby', '.rb', 'def greet(name)\n  "hello #{name}"\nend\n', 'ruby',10000);
+    // ── Why this test is different from the others ──
+    //
+    // Ruby LSP (Shopify.ruby-lsp) has an activation event of
+    // `workspaceContains:Gemfile.lock`. Its `activate()` function bails out
+    // early with a warning if `vscode.workspace.workspaceFolders` is empty
+    // (see out/extension.js: "Using the Ruby LSP without any workspaces
+    // opened is currently not supported"). Even when there IS a workspace
+    // folder, Ruby LSP's per-file `onDidOpenTextDocument` listener refuses
+    // to start a client for files that aren't in *any* workspace folder
+    // (`getWorkspaceFolder(uri) === undefined` → bail).
+    //
+    // That means: opening a `.rb` file from a random `/var/folders/.../tmp/`
+    // dir never starts a language client, regardless of how long we wait.
+    // The test needs the file to be inside an open workspace folder that
+    // also has a `Gemfile.lock`.
+    //
+    // The simplest reliable way to satisfy both constraints without
+    // triggering a single-folder→multi-folder extension-host restart
+    // (which `updateWorkspaceFolders` would do) is to put the fixture
+    // inside the user's *existing* workspace folder. We use a hidden
+    // `.cc_diag_ruby_*` subdir so it doesn't show prominently in the
+    // explorer, and we delete it in `finally` so it never lingers.
+    //
+    // We MUST use `workspace.applyEdit` (not `workspace.fs.writeFile`) to
+    // create `Gemfile.lock`, because `onDidCreateFiles` only fires for the
+    // former. Without that event, VS Code never re-evaluates the
+    // `workspaceContains:` activation event, and Ruby LSP never gets the
+    // signal to start its client.
+    const ts = Date.now();
+    const idx = _counter++;
+    const rubyDirName = `.cc_diag_ruby_${ts}_${idx}`;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+        ctx.ok(false, 'ruby: test requires an open workspace folder', 'no workspace folder open');
+        return;
+    }
+    const rubyDir = vscode.Uri.file(path.join(workspaceRoot, rubyDirName));
+
+    const gemfileContent = 'source "https://rubygems.org"\ngem "ruby-lsp"\n';
+    const gemfileLockContent = [
+        'GEM',
+        '  remote: https://rubygems.org/',
+        '  specs:',
+        '    language_server-protocol (3.17.0.5)',
+        '    prism (1.4.0)',
+        '    rbs (3.9.1)',
+        '    ruby-lsp (0.26.9)',
+        '      language_server-protocol (~> 3.17.0)',
+        '      prism (~> 1.0)',
+        '      rbs (~> 3.0)',
+        '      sorbet-runtime (>= 0.5.10782)',
+        '    sorbet-runtime (0.5.12001)',
+        '',
+        'PLATFORMS',
+        '  ruby',
+        '',
+        'DEPENDENCIES',
+        '  ruby-lsp',
+        '',
+        'BUNDLED WITH',
+        '   2.6.6',
+    ].join('\n');
+    const greetContent = 'def greet(name)\n  "hello #{name}"\nend\n';
+
+    // Create the directory first via fs API (applyEdit can't create dirs).
+    // Then create the files via applyEdit so onDidCreateFiles fires.
+    await vscode.workspace.fs.createDirectory(rubyDir);
+    const gemfileUri = vscode.Uri.file(path.join(rubyDir.fsPath, 'Gemfile'));
+    const gemfileLockUri = vscode.Uri.file(path.join(rubyDir.fsPath, 'Gemfile.lock'));
+    const greetUri = vscode.Uri.file(path.join(rubyDir.fsPath, 'greet.rb'));
+
+    // Use applyEdit so onDidCreateFiles fires and VS Code re-evaluates
+    // workspaceContains:Gemfile.lock — this is what triggers Ruby LSP to
+    // (re-)activate and start its language client.
+    const edit = new vscode.WorkspaceEdit();
+    edit.createFile(gemfileUri, { ignoreIfExists: true, contents: Buffer.from(gemfileContent, 'utf-8') });
+    edit.createFile(gemfileLockUri, { ignoreIfExists: true, contents: Buffer.from(gemfileLockContent, 'utf-8') });
+    edit.createFile(greetUri, { ignoreIfExists: true, contents: Buffer.from(greetContent, 'utf-8') });
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+        ctx.ok(false, 'ruby: applyEdit to create fixture files');
+        return;
+    }
+
+    try {
+        // Wait for Ruby LSP to finish activating. The `applyEdit` call
+        // fires onDidCreateFiles, which makes VS Code re-evaluate
+        // workspaceContains:Gemfile.lock and call Ruby LSP's `activate()`.
+        // That promise resolves when the language client is started.
+        const activated = await waitForExtensionActive('Shopify.ruby-lsp', 10_000);
+        ctx.value('ruby: ruby-lsp activated', activated);
+
+        // Open the file so didOpen is sent to the (now-running) client.
+        await openDocument(greetUri);
+
+        // Hybrid wait: event-driven (onDidChangeDiagnostics) with a polling
+        // fallback. Ruby LSP *should* publish diagnostics for the file once
+        // it's indexed, but if it doesn't, we still poll for symbols because
+        // `executeDocumentSymbolProvider` works against whatever the client
+        // has indexed, even if no diagnostics were published.
+    const t0 = Date.now();
+    const result = await waitForLsp(greetUri, 10_000, 1);
+    const elapsed = Date.now() - t0;
+
+    ctx.ok(typeof result.ok === 'boolean', 'ruby: waitForLsp completed', result.ok);
+    ctx.value('ruby: response', result.ok ? `found symbols in ${elapsed}ms (${result.attemptCount} attempt(s))` : `no symbols — timed out (${elapsed}ms, ${result.attemptCount} attempt(s))`);
+
+    if (result.ok && result.symbols) {
+        ctx.value('ruby: symbol count', result.symbols.length);
+        ctx.value('ruby: first symbols', result.symbols.slice(0, 5).map(s => `${s.kind} ${s.name}`).join(' | '));
+    }
+
+    // Log extension info
+    const allForRuby = vscode.extensions.all
+        .filter(ex => {
+            const pkg = ex.packageJSON;
+            if (pkg?.contributes?.languages?.some((l: { id: string }) => l.id === 'ruby')) return true;
+            if (Array.isArray(pkg?.activationEvents) && pkg.activationEvents.includes('onLanguage:ruby')) return true;
+            if (Array.isArray(pkg?.activationEvents) && pkg.activationEvents.some((e: string) => e.startsWith('workspaceContains:'))) return true;
+            return false;
+        })
+        .map(ex => ({ id: ex.id, active: ex.isActive, version: ex.packageJSON.version }));
+    for (const ex of allForRuby) {
+        ctx.value('ruby: extension', `[${ex.active ? 'active' : 'inactive'}] ${ex.id}@${ex.version}`);
+    }
+
+    const anyActive = allForRuby.some(ex => ex.active);
+    if (anyActive) {
+        ctx.ok(result.ok, 'ruby: LSP responds with symbols', result.symbols ? `found ${result.symbols.length} symbol(s)` : 'no symbols');
+    } else {
+        ctx.value('ruby: expectation', 'extension(s) installed but none active — LSP may not work');
+    }
+} finally {
+    // Close the tab and remove the fixture dir. If we leave the dir
+    // around, the next time the user opens a Ruby file, Ruby LSP will
+    // re-activate for it (because Gemfile.lock still exists in the
+    // workspace) and may show a "missing ruby-lsp gem" warning.
+    await closeTabForUri(greetUri);
+    try {
+        await vscode.workspace.fs.delete(rubyDir, { recursive: true, useTrash: false });
+    } catch {
+        // best-effort
+    }
+}
 });
 
 test('LSP: Dart responds with symbols', async (ctx) => {
